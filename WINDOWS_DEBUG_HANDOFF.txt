@@ -1,0 +1,154 @@
+# Harbor Windows playback and performance handoff
+
+The current checkout contains the Windows-focused fixes and diagnostics. The
+working branch is `beta-branch`; current base commit before uncommitted changes:
+`de076024b216e719594f90b5b97b945854260708`.
+
+The connected T3 environment visible to the user is `DESKTOP-QK4IT1K`.
+Use the LAN route shown in the user's T3 Environments panel. The current agent can reach its HTTP endpoint, but the
+T3 orchestration API in this session does not expose the peer environment as a
+callable environment ID. Use that Windows environment directly in T3 Code.
+
+Connection investigation facts: `t3_environment_links` and
+`t3_environment_link` are described in runtime instructions but are absent from
+this agent's exposed callable tools. Calls returned `TypeError: ... is not a
+function`. `t3_environment_read({})` returned only the Mac environment. The
+Windows HTTP endpoint returned 200, so this is not evidence of a network outage.
+The user's screenshot shows Connected and allowed permissions. Do not equate
+missing agent tool exposure with a disconnected desktop environment. Do not
+extract tokens or decrypt the desktop connection catalog; fix supported tool
+exposure/routing instead.
+
+## Build a Windows debug executable
+
+Prerequisites: Windows 10/11, Node.js 22+, pnpm 11, Rust stable with the MSVC
+toolchain, Visual Studio Build Tools with Desktop C++ workload, and WebView2
+Runtime, Git for Windows (Bash on PATH), and a JDK 17+ for Capstan staging.
+
+From the repository root in PowerShell:
+
+```powershell
+pnpm install --frozen-lockfile
+pnpm run setup
+pnpm tauri build --debug --bundles nsis
+```
+
+The NSIS debug installer is produced under
+`src-tauri/target/debug/bundle/nsis/`; the application executable is
+`src-tauri/target/debug/harbor.exe`. For a directly runnable debug app without an
+installer:
+
+```powershell
+pnpm tauri build --debug --no-bundle
+```
+
+Do not transfer only `harbor.exe`: the app also needs its DLLs, sidecars, and
+resource directories. Prefer the installer for transfer.
+
+Do not use the macOS generated binaries from another checkout. `setup:libmpv`
+downloads and verifies the Windows `libmpv-2.dll`; `setup:binaries` fetches the
+Windows sidecars required by the Tauri config.
+
+## Run with diagnostics enabled
+
+Close other Harbor instances first, then run:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/dev-diag.ps1
+```
+
+In another PowerShell window:
+
+```powershell
+node scripts/harbor-diag.mjs pages
+node scripts/harbor-diag.mjs state
+node scripts/harbor-diag.mjs perf
+node scripts/harbor-diag.mjs navigate calendar
+node scripts/harbor-diag.mjs watch 30 5
+```
+
+The MCP server is:
+
+```powershell
+node scripts/harbor-diag-mcp.mjs
+```
+
+It exposes safe state/performance/image/navigation tools. Arbitrary evaluation
+and heap snapshots require `HARBOR_DIAG_UNSAFE=1` and should stay disabled for
+normal bug capture.
+
+## Reproduce the reported Windows issue
+
+1. Start a clean diagnostics session and export the player log once.
+2. Play the same anime source without interacting for at least one episode.
+3. Record wall-clock time and media position for every freeze or stop/restart.
+4. Export after playing another video. The export must contain both sessions.
+5. Run `node scripts/harbor-diag.mjs state` after the symptom and preserve the
+   output with the exported log.
+
+The new log contains timestamped session/lifecycle events, buffering/cache
+transitions, periodic position samples, frame-drop counters, audio reload and
+resync causes, and frontend numeric diagnostics. Stream URLs, credentials,
+local paths, and titles are scrubbed.
+
+Pay special attention to these lines:
+
+- `reload cause=...`: identifies Harbor-triggered reloads.
+- `playback:wake-reconnect`: only emitted after a timer gap followed by a
+  confirmed stalled position; healthy playback advancing during WebView timer
+  throttling must not reload.
+- `playback:audio-resync`: identifies output reload position restoration.
+- `finished playback, success (reason 2)`: mpv stop reason; correlate it with
+  preceding `stop-request`, command, window, or network events.
+- `Audio device underrun detected` and HTTP/2 receive errors: these may explain
+  a freeze without proving Harbor initiated a reload.
+
+## Remaining work
+
+- Reproduce the original unattended Windows symptom with native mpv, not browser-only playback.
+- Verify normal and repeated Windows log exports and post-export retention.
+- Check Windows native thumbnail/navigation timings with the actual library.
+- Confirm `pnpm diag state`, `perf`, and `navigate` against Windows WebView2.
+- Run the required changed-file check, TypeScript typecheck, and cargo check on Windows.
+- Preserve the existing user settings, hotkeys, and playback position. Do not claim complete on simulations alone.
+- The user explicitly removed the mandatory Linux build requirement from AGENTS.md; do no Linux build work.
+
+## Validation already completed
+
+- Terra browser test: public Anime Calendar populated 483 items; shell paint was
+  about 30 ms, initial data load about 1.99 s, cached return about 1.1 ms; all
+  inspected thumbnails loaded.
+- 89 focused JavaScript/TypeScript tests pass, including Calendar concurrency and
+  caching, MCP/CLI validation, diagnostics retention, image diagnostics,
+  delayed audio-resync lifecycle races, and wake-reconnect guards.
+- `vp check` passes on changed JavaScript/TypeScript/Markdown files.
+- TypeScript typecheck passes.
+- Rust `cargo check --manifest-path src-tauri/Cargo.toml` passes on the Mac with
+  existing repository warnings.
+- Isolated logger tests pass, including multi-video accumulation, failed export
+  retention, Windows-safe export reopening logic, path scrubbing, queue drops,
+  and 64 MiB log rotation.
+
+Native Windows WASAPI, WebView2 scheduling, D3D rendering, and the original
+unattended playback symptom still require the Windows run above. Do not claim
+the original bug is resolved until that run produces correlated evidence.
+
+## Transfer current uncommitted changes
+
+The companion `harbor-windows-debug.patch` includes the current code changes and
+new diagnostics/tests, including this handoff. Apply it only after checking the
+Windows checkout status and matching the base commit above:
+
+```powershell
+git status --short
+git apply --check harbor-windows-debug.patch
+git apply harbor-windows-debug.patch
+```
+
+Do not overwrite existing Windows edits or reset that checkout. Inspect and merge
+conflicts if it has diverged. The patch contains source only, not downloaded
+sidecars, macOS build artifacts, credentials, or the supplied private media log.
+
+A release build retains the new structured diagnostics and accumulated player
+logs too. After diagnosing with the debug build, repeat performance measurements
+in a release build because debug compilation can change timing.

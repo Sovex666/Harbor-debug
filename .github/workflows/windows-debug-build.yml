@@ -62,7 +62,11 @@ jobs:
       - name: Install JS deps
         run: pnpm install --frozen-lockfile
 
+      # The upstream release that hosted libmpv is gone; this mirror holds the same file, and
+      # fetch-libmpv.mjs still checks its pinned SHA-256.
       - name: Fetch libmpv
+        env:
+          HARBOR_LIBMPV_URL: https://github.com/${{ github.repository }}/releases/download/libmpv-windows-x64/libmpv-2.dll
         run: pnpm run setup:libmpv
 
       - name: Fetch mpv

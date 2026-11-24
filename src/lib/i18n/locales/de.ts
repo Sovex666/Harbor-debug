@@ -81,6 +81,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./de/ebook-sources";
 import settingsRefinements from "./de/settings-refinements";
+import debugging from "./de/debugging";
 import sweep from "./de/sweep";
 import used from "./de/used";
 import surfaces from "./de/surfaces";
@@ -339,6 +340,7 @@ const de: Record<string, string> = {
   ...coverage,
   ...subtitles,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

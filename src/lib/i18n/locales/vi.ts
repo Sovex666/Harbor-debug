@@ -80,6 +80,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./vi/ebook-sources";
 import settingsRefinements from "./vi/settings-refinements";
+import debugging from "./vi/debugging";
 import coverage from "./vi/coverage";
 import subtitles from "./vi/subtitles";
 import gap from "./vi/gap";
@@ -334,6 +335,7 @@ const vi: Record<string, string> = {
   ...bpSources,
   ...ageGate,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

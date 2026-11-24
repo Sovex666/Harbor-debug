@@ -80,6 +80,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./ko/ebook-sources";
 import settingsRefinements from "./ko/settings-refinements";
+import debugging from "./ko/debugging";
 import coverage from "./ko/coverage";
 import subtitles from "./ko/subtitles";
 import catalog01 from "./ko/catalog-01";
@@ -293,6 +294,7 @@ const ko: Record<string, string> = {
   ...catalog13,
   ...currentTail,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

@@ -80,6 +80,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./hi/ebook-sources";
 import settingsRefinements from "./hi/settings-refinements";
+import debugging from "./hi/debugging";
 import catalogSymbols from "./hi/catalog-symbols";
 import catalogAC from "./hi/catalog-a-c";
 import catalogDF from "./hi/catalog-d-f";
@@ -281,6 +282,7 @@ const hi: Record<string, string> = {
   ...coverage,
   ...subtitles,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

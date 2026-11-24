@@ -80,6 +80,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./zh/ebook-sources";
 import settingsRefinements from "./zh/settings-refinements";
+import debugging from "./zh/debugging";
 import coverage from "./zh/coverage";
 import subtitles from "./zh/subtitles";
 import sweepA from "./zh/sweep-a";
@@ -288,6 +289,7 @@ const zh: Record<string, string> = {
   ...books,
   ...system,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

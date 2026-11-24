@@ -80,6 +80,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./ru/ebook-sources";
 import settingsRefinements from "./ru/settings-refinements";
+import debugging from "./ru/debugging";
 import gap from "./ru/gap";
 import experimentalUpdates from "./ru/experimental-updates";
 import coverage from "./ru/coverage";
@@ -348,6 +349,7 @@ const ru: Record<string, string> = {
   ...surfaces5,
   ...experimentalUpdates,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

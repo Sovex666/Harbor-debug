@@ -82,6 +82,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./ja/ebook-sources";
 import settingsRefinements from "./ja/settings-refinements";
+import debugging from "./ja/debugging";
 import addons from "./ja/addons";
 import appFill from "./ja/app-fill";
 import awards from "./ja/awards";
@@ -337,6 +338,7 @@ const ja: Record<string, string> = {
   ...together,
   ...questions,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

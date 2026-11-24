@@ -81,6 +81,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./id/ebook-sources";
 import settingsRefinements from "./id/settings-refinements";
+import debugging from "./id/debugging";
 import coverage from "./id/coverage";
 import subtitles from "./id/subtitles";
 import catalog01 from "./id/catalog-01";
@@ -300,6 +301,7 @@ const id: Record<string, string> = {
   ...audit,
   ...identityAudit,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

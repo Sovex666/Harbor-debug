@@ -83,6 +83,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./ar/ebook-sources";
 import settingsRefinements from "./ar/settings-refinements";
+import debugging from "./ar/debugging";
 import uiFallback from "./ui-fallback";
 import experimentalUpdates from "./ar/experimental-updates";
 import coverage from "./ar/coverage";
@@ -340,6 +341,7 @@ const ar: Record<string, string> = {
   ...audit,
   ...experimentalUpdates,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

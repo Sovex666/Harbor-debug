@@ -81,6 +81,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./pl/ebook-sources";
 import settingsRefinements from "./pl/settings-refinements";
+import debugging from "./pl/debugging";
 import catalog01 from "./pl/catalog-01";
 import catalog02 from "./pl/catalog-02";
 import catalog03 from "./pl/catalog-03";
@@ -304,6 +305,7 @@ const pl: Record<string, string> = {
   ...subtitles,
   ...plurals,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

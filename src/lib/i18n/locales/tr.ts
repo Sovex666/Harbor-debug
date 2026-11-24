@@ -81,6 +81,7 @@ import contextActionsFallback from "./context-actions-fallback";
 
 import ebookSources from "./tr/ebook-sources";
 import settingsRefinements from "./tr/settings-refinements";
+import debugging from "./tr/debugging";
 import miscA from "./tr/misc-a";
 import miscB from "./tr/misc-b";
 import miscC from "./tr/misc-c";
@@ -298,6 +299,7 @@ const tr: Record<string, string> = {
   ...coverage,
   ...subtitles,
   ...settingsRefinements,
+  ...debugging,
   ...plugins,
   ...brands,
   ...sportsHub,

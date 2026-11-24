@@ -85,7 +85,11 @@ jobs:
           mv ffprobe.exe "ffprobe-${TARGET}.exe"
           rm ffmpeg.zip
 
+      # beforeBuildCommand stages capstan, whose deps.sh fetched this jar from the same gone
+      # upstream release; the mirror holds the same file and deps.sh still checks its SHA-256.
       - name: Tauri debug build (exe only)
+        env:
+          HARBOR_NANOJSON_URL: https://github.com/${{ github.repository }}/releases/download/nanojson-e9d656d/nanojson-e9d656d.jar
         run: pnpm tauri build --debug --no-bundle
 
       - name: Stage the runnable folder

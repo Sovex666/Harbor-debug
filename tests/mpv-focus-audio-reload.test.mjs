@@ -163,3 +163,44 @@ test("a stream change invalidates recovery waiting for an audio property write",
   assert.equal(reloads(h).length, 0);
   await h.bridge.destroy();
 });
+
+for (const transition of ["unchanged", "next-video", "failure", "pause", "end-file", "destroy"]) {
+  test(`delayed audio resync respects ${transition} lifecycle`, async () => {
+    const h = mpvBridgeHarness();
+    await h.bridge.load({ url: "https://media.example/first.mkv" });
+    h.emit("pause", false);
+    h.emit("af", "dynaudnorm");
+    h.emit("audio-device-list", [{ name: "auto" }]);
+    const position = deferred();
+    h.invokeWith(async (command, args) => {
+      if (command === "mpv_get_property" && args.name === "time-pos") return position.promise;
+      if (command === "mpv_get_property" && args.name === "audio-device") return "auto";
+    });
+    h.emit("audio-device-list", [{ name: "auto" }, { name: "wasapi/new" }]);
+    h.runTimers();
+    await flushBridge();
+    assert.ok(
+      h.commands.some(
+        ({ command, args }) => command === "mpv_get_property" && args.name === "time-pos",
+      ),
+    );
+    if (transition === "next-video")
+      await h.bridge.load({ url: "https://media.example/second.mkv" });
+    else if (transition === "failure")
+      h.emitEvent({ event: "player-failure", reason: "persistent-event-errors" });
+    else if (transition === "pause") h.emit("pause", true);
+    else if (transition === "end-file") h.emitEvent({ event: "end-file", reason: "eof" });
+    else if (transition === "destroy") await h.bridge.destroy();
+    const boundary = h.commands.length;
+    position.resolve(123);
+    await flushBridge();
+    assert.equal(
+      h.commands
+        .slice(boundary)
+        .filter(({ command, args }) => command === "mpv_command" && args.cmd?.[0] === "seek")
+        .length,
+      transition === "unchanged" ? 1 : 0,
+    );
+    await h.bridge.destroy();
+  });
+}

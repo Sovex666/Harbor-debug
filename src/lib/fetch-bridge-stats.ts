@@ -1,3 +1,5 @@
+import { recordDiagnostic } from "./perf/diagnostics";
+
 export type BridgeKind = "direct" | "directFail" | "harborFetch" | "pluginHttp";
 export type BridgeOutcome = "ok" | "error" | "timeout" | "abort";
 
@@ -64,6 +66,10 @@ export function recordBridge(
   elapsedMs: number,
   outcome: BridgeOutcome,
 ): void {
+  recordDiagnostic(`bridge:${kind.toLowerCase()}:${outcome}`, {
+    elapsedMs,
+    error: outcome === "error" || outcome === "timeout",
+  });
   const host = hostOf(url);
   const key = `${kind} ${host}`;
   let bucket = buckets.get(key);

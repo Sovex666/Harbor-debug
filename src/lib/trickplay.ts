@@ -24,13 +24,33 @@ export function useTrickplayState(): TrickplayState {
 }
 
 const thumbCache = new Map<number, string>();
+let thumbBytes = 0;
+function clearThumbMemory() {
+  thumbCache.clear();
+  thumbBytes = 0;
+}
 
 export function thumbCacheGet(bucket: number): string | undefined {
-  return thumbCache.get(bucket);
+  const value = thumbCache.get(bucket);
+  if (value !== undefined) {
+    thumbCache.delete(bucket);
+    thumbCache.set(bucket, value);
+  }
+  return value;
 }
 
 export function thumbCacheSet(bucket: number, dataUri: string): void {
+  thumbBytes -= (thumbCache.get(bucket)?.length ?? 0) * 2;
+  thumbCache.delete(bucket);
+  if (dataUri.length * 2 > 48 * 1024 * 1024) return;
   thumbCache.set(bucket, dataUri);
+  thumbBytes += dataUri.length * 2;
+  while (thumbCache.size > 160 || thumbBytes > 48 * 1024 * 1024) {
+    const first = thumbCache.entries().next().value;
+    if (!first) break;
+    thumbBytes -= first[1].length * 2;
+    thumbCache.delete(first[0]);
+  }
 }
 
 export function thumbCacheNearest(bucket: number, maxDistance: number): string | undefined {
@@ -49,7 +69,7 @@ export function thumbCacheNearest(bucket: number, maxDistance: number): string |
 }
 
 export async function trickplaySetUrl(url: string): Promise<void> {
-  thumbCache.clear();
+  clearThumbMemory();
   try {
     await invoke("thumbs_set_url", { url });
   } catch {}
@@ -70,7 +90,7 @@ export async function trickplayGet(timeSec: number): Promise<string | null> {
 }
 
 export async function trickplayStop(): Promise<void> {
-  thumbCache.clear();
+  clearThumbMemory();
   try {
     await invoke("thumbs_stop");
   } catch {}

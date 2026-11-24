@@ -6,6 +6,8 @@ export type HomeRow = {
   name: string;
   metas: Meta[];
   page: number;
+  firstPageLength?: number;
+  browseRevision?: number;
   hasMore: boolean;
   noDedup?: boolean;
   fetcher?: (page: number) => Promise<Meta[]>;

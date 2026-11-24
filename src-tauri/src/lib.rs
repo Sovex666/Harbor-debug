@@ -13,6 +13,7 @@ mod cast_subs;
 mod context_review;
 mod crash_report;
 mod diagnostics;
+mod diagnostics_sessions;
 mod download;
 mod download_file_policy;
 mod download_files;
@@ -980,11 +981,13 @@ pub fn run() {
         std::thread::spawn(temp_prune::sweep_temp);
     }
 
-    let proxy_state = tauri::async_runtime::block_on(stream_proxy::ProxyState::start())
-        .unwrap_or_else(|e| {
-            eprintln!("[stream-proxy] failed to start: {}", e);
-            stream_proxy::ProxyState::placeholder()
-        });
+    let proxy_state = if !cfg!(feature = "context-review") {
+        Some(tauri::async_runtime::block_on(stream_proxy::ProxyState::start())
+            .unwrap_or_else(|e| {
+                eprintln!("[stream-proxy] failed to start: {}", e);
+                stream_proxy::ProxyState::placeholder()
+            }))
+    } else { None };
     let mpv_state = mpv::MpvState::new();
     let pip_state = pip::PipState::new();
     let pip_window_state = pip_window::PipWindowState::default();
@@ -1054,7 +1057,6 @@ pub fn run() {
             let builder = builder.skip_initial_state("main");
             builder.build()
         })
-        .manage(proxy_state)
         .manage(mpv_state)
         .manage(pip_state)
         .manage(pip_window_state)
@@ -1065,6 +1067,12 @@ pub fn run() {
         .manage(modal_overlay_state)
         .manage(discord_rp::DiscordState::new())
         .manage(download::DownloadState::new());
+
+    let app_builder = if let Some(proxy_state) = proxy_state {
+        app_builder.manage(proxy_state)
+    } else {
+        app_builder
+    };
 
     #[cfg(feature = "music")]
     let app_builder = if install_features::music_enabled() {
@@ -1094,6 +1102,13 @@ pub fn run() {
     app_builder
         .plugin(privacy::init())
         .on_page_load(|webview, payload| {
+            if cfg!(feature = "context-review")
+                && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
+            {
+                if let Ok(script) = context_review::identity_script(webview.label()) {
+                    let _ = webview.eval(script);
+                }
+            }
             if webview.label() == "main"
                 && matches!(payload.event(), tauri::webview::PageLoadEvent::Finished)
             {
@@ -1101,6 +1116,25 @@ pub fn run() {
             }
         })
         .setup(move |app| {
+            if cfg!(feature = "context-review") {
+                use tauri::Manager;
+                let webview_data = app.path().app_local_data_dir()?.join("webview2");
+                context_review::attest_storage(app.handle(), &webview_data)
+                    .map_err(std::io::Error::other)?;
+                let proxy = tauri::async_runtime::block_on(stream_proxy::ProxyState::start())
+                    .unwrap_or_else(|e| {
+                        eprintln!("[stream-proxy] failed to start: {}", e);
+                        stream_proxy::ProxyState::placeholder()
+                    });
+                app.manage(proxy);
+                let config = app.config().app.windows.iter().find(|window| window.label == "main")
+                    .ok_or_else(|| std::io::Error::other("missing review main window configuration"))?;
+                let builder = tauri::WebviewWindowBuilder::from_config(app, config)?;
+                #[cfg(any(windows, target_os = "macos"))]
+                let builder = builder.data_directory(webview_data);
+                builder.build()?;
+            }
+            diagnostics_sessions::initialize(app.handle()).map_err(std::io::Error::other)?;
             #[cfg(windows)]
             if let Err(error) = native_context_menu::install(app.handle()) {
                 eprintln!("[harbor::context-menu] install failed: {error}");
@@ -1259,7 +1293,7 @@ pub fn run() {
             }
             match event {
                 tauri::WindowEvent::CloseRequested { api, .. } => {
-                    if tray::close_to_tray() {
+                    if !cfg!(feature = "context-review") && tray::close_to_tray() {
                         api.prevent_close();
                         let _ = window.hide();
                     } else if !CLOSE_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -1843,6 +1877,17 @@ pub fn run() {
             proc_mem::harbor_process_memory,
             diagnostics::diagnostics_collect,
             diagnostics::diagnostics_cleanup,
+            diagnostics_sessions::diagnostics_session_start,
+            diagnostics_sessions::diagnostics_session_status,
+            diagnostics_sessions::diagnostics_session_stop,
+            diagnostics_sessions::diagnostics_append_batch,
+            diagnostics_sessions::diagnostics_sessions_list,
+            diagnostics_sessions::diagnostics_session_export,
+            diagnostics_sessions::diagnostics_session_open_folder,
+            diagnostics_sessions::diagnostics_sessions_prune,
+            diagnostics_sessions::diagnostics_clock_sample,
+            diagnostics_sessions::diagnostics_preferences_read,
+            diagnostics_sessions::diagnostics_preferences_write,
             trailer::fetch_trailer,
             trailer::resolve_youtube_stream,
             #[cfg(feature = "music")]
@@ -2168,6 +2213,8 @@ pub fn run() {
             multiview::multiview_visibility,
             multiview::multiview_stop_all,
             http_fetch::harbor_fetch,
+            http_fetch::harbor_image_fetch,
+            http_fetch::harbor_image_cancel,
             http_fetch::harbor_upload,
             http_fetch::clear_thumb_cache,
             http_fetch::thumb_cache_size,

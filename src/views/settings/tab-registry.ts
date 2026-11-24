@@ -113,6 +113,11 @@ export const SECTION_TABS: Partial<Record<SectionId, TabEntry[]>> = {
     { id: "video", label: "Video files", icon: "FileVideo" },
     { id: "caches", label: "Caches", icon: "Trash2" },
   ],
+  debugging: [
+    { id: "capture", label: "Capture", icon: "Activity" },
+    { id: "sessions", label: "Sessions", icon: "Folder" },
+    { id: "self-test", label: "Self-test", icon: "CheckCircle" },
+  ],
   webhooks: [
     { id: "destinations", label: "Destinations", icon: "Send" },
     { id: "what", label: "Sources", icon: "Rss" },

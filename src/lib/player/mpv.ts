@@ -34,6 +34,7 @@ import { SubtitleSelectionCoordinator, type SubtitleSelectionOrigin } from "./su
 import { PreparedSubtitleSeedBatch } from "@/lib/subtitles/seed-batch";
 import { isSafeProviderSubtitleUrl } from "@/lib/subtitles/provider-url";
 import { traceFrameDrops, tracePlayback } from "./pause-trace";
+import { recordDiagnostic } from "@/lib/perf/diagnostics";
 import {
   initialPlayerSnapshot,
   type PlayerBridge,
@@ -685,6 +686,11 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
         ? snap.status === "playing" || snap.status === "paused"
         : observedPaused !== true && snap.status === "playing");
     if (!canReload()) return false;
+    recordDiagnostic("playback:audio-reload", {
+      load: mediaLoadId,
+      allowPaused,
+      normalized: snap.audioNormalize,
+    });
 
     // Remember the selected audio track so we can restore it after the
     // output reload deselects it (mpv drops the track on ao init failure).
@@ -716,7 +722,16 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
       const pos = await invoke<number | null>("mpv_get_property", {
         name: "time-pos",
       }).catch(() => null);
-      if (typeof pos === "number" && Number.isFinite(pos) && lastUserSeekAt <= reloadBeganAt) {
+      if (
+        canReload() &&
+        typeof pos === "number" &&
+        Number.isFinite(pos) &&
+        lastUserSeekAt <= reloadBeganAt
+      ) {
+        recordDiagnostic("playback:audio-resync", { load: mediaLoadId, position: pos });
+        tracePlayback(
+          `audio-resync cause=normalized-output-reload load=${mediaLoadId} position=${pos}`,
+        );
         invoke("mpv_command", { cmd: ["seek", pos, "absolute+exact"] }).catch(() => {});
       }
     }
@@ -771,6 +786,9 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
       lastAudioDeviceListSig = observedAudioDeviceListSig;
       pendingAudioDeviceChange = false;
       pendingAudioDeviceReload = false;
+      tracePlayback(
+        `audio-reload cause=${mustReload ? "wake" : "device-change"} load=${mediaLoadId} normalize=${snap.audioNormalize}`,
+      );
       void performAudioDeviceReload(false)
         .then((reloaded) => {
           if (!reloaded && isCurrentMedia() && deviceRequest) {
@@ -833,6 +851,7 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
       return;
     }
     if (raw.event === "player-failure") {
+      recordDiagnostic("playback:failure", { load: mediaLoadId, position: snap.positionSec });
       clearAudioDeviceReload();
       const reason = String((raw as { reason?: unknown }).reason ?? "");
       snap = mpvFailureSnapshot(snap, reason);
@@ -1000,7 +1019,17 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
       if (name === "height" && typeof data === "number") snap.videoSourceHeight = data;
       if (name === "video-params/gamma" && typeof data === "string" && data) snap.hdrGamma = data;
       if (name === "demuxer-cache-duration" && typeof data === "number") snap.bufferedSec = data;
-      if (name === "paused-for-cache" && typeof data === "boolean") snap.buffering = data;
+      if (name === "paused-for-cache" && typeof data === "boolean") {
+        if (snap.buffering !== data) {
+          recordDiagnostic("playback:buffering", {
+            load: mediaLoadId,
+            active: data,
+            position: snap.positionSec,
+            cache: snap.bufferedSec,
+          });
+        }
+        snap.buffering = data;
+      }
       if (name === "af") {
         const repr = typeof data === "string" ? data : JSON.stringify(data ?? "");
         snap.audioNormalize = repr.includes("dynaudnorm");
@@ -1018,6 +1047,13 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
       emit();
     } else if (raw.event === "end-file") {
       const reason = (raw as { reason?: string }).reason?.toLowerCase();
+      recordDiagnostic("playback:end-file", {
+        load: mediaLoadId,
+        position: snap.positionSec,
+        stopped: reason === "stop",
+        failed: reason === "error",
+        suppressed: Date.now() < suppressEndFileUntil,
+      });
       if (reason === "stop" || reason === "quit" || reason === "redirect") return;
       if (Date.now() < suppressEndFileUntil) return;
       clearAudioDeviceReload();
@@ -1030,12 +1066,18 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
       }
       emit();
     } else if (raw.event === "file-loaded") {
+      recordDiagnostic("playback:file-loaded", { load: mediaLoadId });
       markPlaybackTrace(activeTraceId, "file-loaded");
       snap.status = observedPaused === true ? "paused" : "playing";
       snap.errorCode = null;
       snap.errorMessage = null;
       emit();
     } else if (raw.event === "playback-restart") {
+      recordDiagnostic("playback:restart", {
+        load: mediaLoadId,
+        position: snap.positionSec,
+        buffering: snap.buffering,
+      });
       if (
         expectedMediaPath &&
         observedMediaPath &&
@@ -1150,6 +1192,10 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
     async load(src: PlayerSource) {
       clearAudioDeviceReload();
       const activeLoadId = ++mediaLoadId;
+      recordDiagnostic("playback:load", { load: activeLoadId, live: src.isLive === true });
+      tracePlayback(
+        `load-request load=${activeLoadId} live=${src.isLive === true} cause=bridge-load`,
+      );
       if (activeTraceId && activeTraceId !== src.traceId) {
         finishPlaybackTrace(activeTraceId, "replaced");
       }
@@ -1319,6 +1365,7 @@ export function createMpvBridge(mpvOptions?: MpvOptions): PlayerBridge {
           window.clearTimeout(audioDeviceReloadTimer);
           audioDeviceReloadTimer = null;
         }
+        tracePlayback(`audio-reload cause=resume-device-change load=${mediaLoadId}`);
         const reloaded = await performAudioDeviceReload(true).catch(() => false);
         if (!reloaded && deviceRequest) {
           pendingAudioDeviceChange = true;

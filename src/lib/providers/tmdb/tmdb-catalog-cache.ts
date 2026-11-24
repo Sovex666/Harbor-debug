@@ -13,6 +13,9 @@ export function isCatalogPath(path: string): boolean {
 export function createCatalogCache(now: () => number = Date.now) {
   const pages = new Map<string, { expires: number; data: unknown }>();
   return {
+    clear(): void {
+      pages.clear();
+    },
     get<T>(key: string): T | undefined {
       const entry = lruGet(pages, key);
       if (!entry) return undefined;
@@ -32,5 +35,55 @@ export function createCatalogCache(now: () => number = Date.now) {
         MAX_CATALOG_PAGES,
       );
     },
+  };
+}
+
+const fields = [
+  "id",
+  "title",
+  "name",
+  "original_title",
+  "original_name",
+  "original_language",
+  "overview",
+  "poster_path",
+  "backdrop_path",
+  "release_date",
+  "first_air_date",
+  "vote_average",
+  "genre_ids",
+  "adult",
+  "origin_country",
+  "media_type",
+] as const;
+
+export function projectCatalogPage(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object") return null;
+  const page = value as Record<string, unknown>;
+  if (!Array.isArray(page.results) || page.results.length > 100) return null;
+  const results = page.results.map((item: unknown) => {
+    if (!item || typeof item !== "object" || !Number.isFinite((item as { id?: number }).id))
+      return null;
+    const row = item as Record<string, unknown>;
+    const projected: Record<string, unknown> = {};
+    for (const field of fields) {
+      const v = row[field];
+      if (field === "poster_path" || field === "backdrop_path") {
+        if (typeof v === "string" && /^\/[a-zA-Z0-9_.-]+$/.test(v)) projected[field] = v;
+      } else if (
+        typeof v === "string" ||
+        typeof v === "number" ||
+        typeof v === "boolean" ||
+        (Array.isArray(v) && v.every((x) => typeof x === "number" || typeof x === "string"))
+      )
+        projected[field] = v;
+    }
+    return projected;
+  });
+  if (results.some((item) => item === null)) return null;
+  return {
+    results,
+    ...(typeof page.total_results === "number" ? { total_results: page.total_results } : {}),
+    ...(typeof page.total_pages === "number" ? { total_pages: page.total_pages } : {}),
   };
 }

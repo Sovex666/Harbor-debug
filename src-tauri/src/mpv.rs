@@ -15,7 +15,28 @@ pub(crate) fn mpv_argv_command(mpv: &Mpv, argv: &[&str]) -> Result<(), String> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut ptrs: Vec<*const std::os::raw::c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
     ptrs.push(std::ptr::null());
+    let lifecycle = argv
+        .first()
+        .copied()
+        .filter(|head| matches!(*head, "loadfile" | "stop" | "quit" | "ao-reload" | "seek"));
+    if let Some(head) = lifecycle {
+        let source = if head == "loadfile" {
+            argv.get(1).map(|url| source_kind(url)).unwrap_or("missing")
+        } else {
+            "none"
+        };
+        crate::log_privacy::record(format!(
+            "[harbor] command session={:p} name={head} source={source} cause=native-call",
+            mpv.ctx.as_ptr()
+        ));
+    }
     let rc = unsafe { libmpv2_sys::mpv_command(mpv.ctx.as_ptr(), ptrs.as_mut_ptr()) };
+    if let Some(head) = lifecycle {
+        crate::log_privacy::record(format!(
+            "[harbor] command-result session={:p} name={head} rc={rc}",
+            mpv.ctx.as_ptr()
+        ));
+    }
     if rc < 0 {
         return Err(format!("mpv_command rc={}", rc));
     }
@@ -202,7 +223,9 @@ impl MpvState {
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     pub(crate) async fn ctx_addr(&self) -> Option<usize> {
         let guard = self.inner.lock().await;
-        guard.as_ref().map(|session| session.mpv.ctx.as_ptr() as usize)
+        guard
+            .as_ref()
+            .map(|session| session.mpv.ctx.as_ptr() as usize)
     }
 
     /// Preserve the exact selected video track while Linux moves the libmpv
@@ -425,7 +448,9 @@ pub async fn mpv_audio_devices(state: State<'_, MpvState>) -> Result<Vec<AudioDe
 fn mpv_header_field(name: &str, value: &str) -> String {
     // mpv parses this option as a comma-separated string list. An unescaped
     // Accept-Language comma creates an invalid second HTTP header (HTTP 400).
-    format!("{name}: {value}").replace('\\', "\\\\").replace(',', "\\,")
+    format!("{name}: {value}")
+        .replace('\\', "\\\\")
+        .replace(',', "\\,")
 }
 
 fn apply_pre_init(
@@ -818,6 +843,18 @@ pub async fn mpv_start(
     state: State<'_, MpvState>,
     args: MpvStartArgs,
 ) -> Result<(), String> {
+    if let Ok(dir) = app.path().app_data_dir() {
+        if let Err(error) = std::fs::create_dir_all(&dir).and_then(|_| {
+            crate::log_privacy::initialize_log(&dir.join("harbor-mpv.log")).map(|_| ())
+        }) {
+            eprintln!("[harbor::mpv] log initialization failed: {error}");
+        }
+    }
+    crate::log_privacy::record(format!(
+        "[harbor] session-request cause=mpv_start live={} embedded={}",
+        args.is_live.unwrap_or(false),
+        args.embed.unwrap_or(false)
+    ));
     #[cfg(windows)]
     let _lifecycle = state.lifecycle.lock().await;
     let want_embed = args.embed.unwrap_or(false);
@@ -976,6 +1013,7 @@ pub async fn mpv_start(
             format!("mpv init: {}", e)
         };
         eprintln!("[harbor::mpv] init error: {}", msg);
+        crate::log_privacy::record(format!("[harbor] init-error {msg}"));
         msg
     })?;
 
@@ -1025,7 +1063,9 @@ pub async fn mpv_start(
                     "[harbor::mpv] separate window sized via SetWindowPos {}x{}+{}+{}",
                     w, h, x, y
                 ),
-                None => eprintln!("[harbor::mpv] separate window VO not found yet; relying on mpv geometry"),
+                None => eprintln!(
+                    "[harbor::mpv] separate window VO not found yet; relying on mpv geometry"
+                ),
             }
         }
     }
@@ -1363,10 +1403,15 @@ fn spawn_event_loop(
     #[cfg(windows)] hdr_monitor: Option<isize>,
 ) {
     std::thread::spawn(move || {
-        let log = app.path().app_data_dir().ok().and_then(|dir| {
-            std::fs::create_dir_all(&dir).ok()?;
-            crate::log_privacy::start_log(&dir.join("harbor-mpv.log")).ok()
-        });
+        crate::log_privacy::record(format!(
+            "[harbor] session-start session={:p}",
+            mpv_keepalive.ctx.as_ptr()
+        ));
+        let mut last_diagnostic_sample = std::time::Instant::now();
+        let mut diagnostic_position = None;
+        let mut diagnostic_cache = None;
+        let mut log_ipc_window = std::time::Instant::now();
+        let mut log_ipc_count = 0_u32;
         let mut last_timepos: Option<std::time::Instant> = None;
         #[cfg(windows)]
         let reassert_gen = Arc::new(std::sync::atomic::AtomicU64::new(0));
@@ -1405,8 +1450,40 @@ fn spawn_event_loop(
                         ..
                     } = &event
                     {
-                        if let Some(log) = &log {
-                            let _ = log.try_send(format!("[{prefix}] {level}: {text}"));
+                        if text.contains("underrun") {
+                            crate::diagnostics_sessions::native(
+                                "native:audio",
+                                json!({"underrun":true}),
+                            );
+                        } else if text.contains("HTTP/2")
+                            || text.contains("receive failure")
+                            || text.contains("Recv failure")
+                        {
+                            crate::diagnostics_sessions::native(
+                                "native:network",
+                                json!({"error":true,"retry":text.contains("retry")}),
+                            );
+                        }
+                        crate::log_privacy::record(format!(
+                            "[session={:p}] [{prefix}] {level}: {text}",
+                            mpv_keepalive.ctx.as_ptr()
+                        ));
+                        // Underrun storms belong in the file, not in thousands
+                        // of WebView IPC deliveries. Preserve shader/filter
+                        // failures, which drive frontend fallback behavior.
+                        if log_ipc_window.elapsed() >= Duration::from_secs(1) {
+                            log_ipc_window = std::time::Instant::now();
+                            log_ipc_count = 0;
+                        }
+                        let actionable = prefix.contains("vapoursynth")
+                            || prefix.contains("glsl")
+                            || prefix.contains("shader")
+                            || text.contains("Creating filter 'vapoursynth' failed");
+                        if matches!(*level, "fatal" | "error" | "warn") && !actionable {
+                            log_ipc_count = log_ipc_count.saturating_add(1);
+                            if log_ipc_count > 10 {
+                                continue;
+                            }
                         }
                     }
                     let mut shutdown = false;
@@ -1489,6 +1566,62 @@ fn spawn_event_loop(
                     }
                     let payload = event_to_payload(event);
                     if let Some(p) = payload {
+                        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+                        let kind = p.get("event").and_then(Value::as_str).unwrap_or("");
+                        if name == "time-pos" {
+                            diagnostic_position = p["data"].as_f64();
+                        }
+                        if name == "demuxer-cache-duration" {
+                            diagnostic_cache = p["data"].as_f64();
+                        }
+                        let state_transition = kind != "property-change" && kind != "log";
+                        let property_transition = matches!(
+                            name,
+                            "pause" | "paused-for-cache" | "eof-reached" | "audio-device-list"
+                        );
+                        let sample = name == "time-pos"
+                            && last_diagnostic_sample.elapsed() >= Duration::from_secs(5);
+                        if state_transition || property_transition || sample {
+                            let event_code = match kind {
+                                "file-loaded" => 1,
+                                "playback-restart" => 2,
+                                "seek" => 3,
+                                "end-file" => 4,
+                                "shutdown" => 5,
+                                _ => 0,
+                            };
+                            let reason = match p.get("reason").and_then(Value::as_str).unwrap_or("")
+                            {
+                                "eof" => 0,
+                                "stop" => 2,
+                                "quit" => 3,
+                                "error" => 4,
+                                "redirect" => 5,
+                                _ => -1,
+                            };
+                            let fields = json!({"position":diagnostic_position,"cache":diagnostic_cache,
+                                "event":event_code,"reason":reason,"paused":if name=="pause"{p["data"].as_bool()}else{None},
+                                "buffering":if name=="paused-for-cache"{p["data"].as_bool()}else{None}});
+                            crate::diagnostics_sessions::native(
+                                if sample {
+                                    "native:position"
+                                } else if name == "paused-for-cache" {
+                                    "native:buffering"
+                                } else {
+                                    "native:lifecycle"
+                                },
+                                fields,
+                            );
+                            let detail = if name == "audio-device-list" {
+                                format!("device-count={}", p["data"].as_array().map_or(0, Vec::len))
+                            } else {
+                                p.to_string()
+                            };
+                            crate::log_privacy::record(format!("[harbor] event session={:p} position={diagnostic_position:?} cache-seconds={diagnostic_cache:?} {detail}", mpv_keepalive.ctx.as_ptr()));
+                            if sample {
+                                last_diagnostic_sample = std::time::Instant::now();
+                            }
+                        }
                         let _ = app.emit("mpv://event", p);
                     }
                     if shutdown {
@@ -1497,6 +1630,11 @@ fn spawn_event_loop(
                 }
                 Some(Err(e)) => {
                     let delay = error_backoff.next_delay();
+                    crate::log_privacy::record(format!(
+                        "[harbor] event-error session={:p} consecutive={} error={e}",
+                        mpv_keepalive.ctx.as_ptr(),
+                        error_backoff.consecutive
+                    ));
                     if error_backoff.consecutive == 1 || error_backoff.consecutive.is_power_of_two()
                     {
                         eprintln!(
@@ -1527,6 +1665,10 @@ fn spawn_event_loop(
                 None => record_event_poll_success(&mut error_backoff),
             }
         }
+        crate::log_privacy::record(format!(
+            "[harbor] session-end session={:p}",
+            mpv_keepalive.ctx.as_ptr()
+        ));
         drop(mpv_keepalive);
     });
 }
@@ -1707,8 +1849,26 @@ pub async fn mpv_set_property(
         return Err(format!("mpv property not allowed: {}", name));
     }
     let str_val = value_to_arg(&value);
-    mpv.set_property(&name, str_val.as_str())
-        .map_err(|e| format!("set {}: {}", name, e))
+    if matches!(name.as_str(), "pause" | "audio-device" | "aid" | "af") {
+        let detail = if name == "audio-device" {
+            "endpoint-selected".into()
+        } else if name == "af" {
+            "filters-updated".into()
+        } else {
+            str_val.clone()
+        };
+        crate::log_privacy::record(format!(
+            "[harbor] set-property session={:p} name={name} value={detail} cause=frontend",
+            mpv.ctx.as_ptr()
+        ));
+    }
+    mpv.set_property(&name, str_val.as_str()).map_err(|e| {
+        crate::log_privacy::record(format!(
+            "[harbor] property-error session={:p} name={name} error={e}",
+            mpv.ctx.as_ptr()
+        ));
+        format!("set {}: {}", name, e)
+    })
 }
 
 #[tauri::command]
@@ -1802,7 +1962,11 @@ pub async fn mpv_set_geometry(
 ) -> Result<(), String> {
     // The detached window owns the live surface and resizes it through its own
     // fit command. Late geometry updates from Harbor must not move that surface.
-    if app.state::<crate::pip_window::PipWindowState>().active.load(std::sync::atomic::Ordering::SeqCst) {
+    if app
+        .state::<crate::pip_window::PipWindowState>()
+        .active
+        .load(std::sync::atomic::Ordering::SeqCst)
+    {
         return Ok(());
     }
     #[cfg(windows)]
@@ -1890,22 +2054,26 @@ pub async fn mpv_set_geometry(
 }
 
 #[tauri::command]
-pub fn mpv_export_log(app: AppHandle) -> Result<String, String> {
-    use tauri::Manager;
-    let src = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("harbor-mpv.log");
-    if !src.exists() {
-        return Err("No player log yet. Play something first, then export.".into());
-    }
-    let dl = app.path().download_dir().map_err(|e| e.to_string())?;
-    let dst = dl.join("harbor-mpv-log.txt");
-    let raw = std::fs::read(&src).map_err(|e| format!("read: {}", e))?;
-    let scrubbed = crate::log_privacy::scrub(&String::from_utf8_lossy(&raw));
-    std::fs::write(&dst, scrubbed).map_err(|e| format!("write: {}", e))?;
-    Ok(dst.to_string_lossy().into_owned())
+pub async fn mpv_export_log(
+    app: AppHandle,
+    runtime_text: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let src = directory.join("harbor-mpv.log");
+        if !src.exists() && runtime_text.is_none() {
+            return Err("No player log yet. Play something first, then export.".into());
+        }
+        std::fs::create_dir_all(&directory).map_err(|e| format!("log directory: {e}"))?;
+        let writer = crate::log_privacy::initialize_log(&src).map_err(|e| format!("log: {e}"))?;
+        let dl = app.path().download_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dl).map_err(|e| format!("Downloads: {e}"))?;
+        let dst = dl.join(format!("harbor-mpv-log-{}.txt", Uuid::new_v4()));
+        writer.export(dst.clone(), runtime_text)?;
+        Ok(dst.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("log export task: {e}"))?
 }
 
 #[tauri::command]
@@ -2012,12 +2180,12 @@ pub async fn display_hdr_active(_app: AppHandle) -> Result<bool, String> {
 /// yet, so the caller can fall back to mpv's own geometry.
 #[cfg(windows)]
 fn size_separate_mpv_window(x: i32, y: i32, w: i32, h: i32) -> Option<()> {
+    use windows::core::BOOL;
     use windows::Win32::Foundation::{HWND, LPARAM};
     use windows::Win32::UI::WindowsAndMessaging::{
         EnumWindows, GetClassNameW, GetWindowThreadProcessId, SetWindowPos, HWND_TOP,
         SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOZORDER,
     };
-    use windows::core::BOOL;
 
     let own_pid = std::process::id();
 
@@ -2085,8 +2253,8 @@ fn monitor_hdr_active(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> bool {
     // rectangle instead.
     let mut mi = MONITORINFOEXW::default();
     mi.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
-    let have_rect = hmon.0 as isize != 0
-        && unsafe { GetMonitorInfoW(hmon, &mut mi.monitorInfo) }.as_bool();
+    let have_rect =
+        hmon.0 as isize != 0 && unsafe { GetMonitorInfoW(hmon, &mut mi.monitorInfo) }.as_bool();
     let mon_rect = mi.monitorInfo.rcMonitor;
 
     let factory: IDXGIFactory1 = match unsafe { CreateDXGIFactory1() } {
@@ -2120,8 +2288,8 @@ fn monitor_hdr_active(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> bool {
                 Err(_) => continue,
             };
 
-            let monitor_matches = hmon.0 as isize != 0
-                && desc.Monitor.0 as isize == hmon.0 as isize;
+            let monitor_matches =
+                hmon.0 as isize != 0 && desc.Monitor.0 as isize == hmon.0 as isize;
             let rect_matches = have_rect && {
                 let d = desc.DesktopCoordinates;
                 let cx = (mon_rect.left + mon_rect.right) / 2;
@@ -2141,10 +2309,7 @@ fn monitor_hdr_active(hmon: windows::Win32::Graphics::Gdi::HMONITOR) -> bool {
 /// Windows Settings and display-info.dll use; Harbor calls it as an
 /// authoritative restore after mpv teardown.
 #[cfg(windows)]
-fn set_monitor_advanced_color(
-    hmon: windows::Win32::Graphics::Gdi::HMONITOR,
-    enable: bool,
-) -> bool {
+fn set_monitor_advanced_color(hmon: windows::Win32::Graphics::Gdi::HMONITOR, enable: bool) -> bool {
     use windows::Win32::Devices::Display::{
         DisplayConfigGetDeviceInfo, DisplayConfigSetDeviceInfo, GetDisplayConfigBufferSizes,
         QueryDisplayConfig, DISPLAYCONFIG_DEVICE_INFO_GET_SOURCE_NAME,
@@ -3134,6 +3299,7 @@ pub async fn sub_download(
 
 #[tauri::command]
 pub async fn mpv_stop(app: AppHandle, state: State<'_, MpvState>) -> Result<(), String> {
+    crate::log_privacy::record("[harbor] stop-request cause=mpv_stop".into());
     #[cfg(windows)]
     let _lifecycle = state.lifecycle.lock().await;
     let mut g = state.inner.lock().await;
@@ -3191,6 +3357,7 @@ pub async fn mpv_stop(app: AppHandle, state: State<'_, MpvState>) -> Result<(), 
 
 #[tauri::command]
 pub async fn mpv_release_media(app: AppHandle, state: State<'_, MpvState>) -> Result<bool, String> {
+    crate::log_privacy::record("[harbor] stop-request cause=release-retained-media".into());
     #[cfg(windows)]
     {
         let (mpv, embedded) = {
@@ -3315,7 +3482,9 @@ fn embedded_surface_trace(app: &AppHandle) -> Option<String> {
         MPV_BLOCKED_ICONIC_RESIZES.load(std::sync::atomic::Ordering::Relaxed),
     );
     let mut last = LAST.lock().ok()?;
-    if last.as_ref() == Some(&line) { return None; }
+    if last.as_ref() == Some(&line) {
+        return None;
+    }
     *last = Some(line.clone());
     Some(line)
 }
@@ -3362,8 +3531,7 @@ unsafe extern "system" fn mpv_size_guard_proc(
 // there. The temporary hook is removed before returning; no mpv calls run in
 // either callback, which would deadlock against the video-output thread.
 #[cfg(windows)]
-static MPV_SIZE_GUARD_STATE: std::sync::Mutex<Option<(isize, bool)>> =
-    std::sync::Mutex::new(None);
+static MPV_SIZE_GUARD_STATE: std::sync::Mutex<Option<(isize, bool)>> = std::sync::Mutex::new(None);
 
 /// Installs the guard at most once per video window. SendMessage crosses to
 /// mpv's video-output thread, so this must never run on every resize frame.
@@ -3396,7 +3564,12 @@ fn install_mpv_size_guard(hwnd: windows::Win32::Foundation::HWND) -> Result<(), 
         if code >= 0 {
             let message = &*(l.0 as *const CWPSTRUCT);
             if message.message == HARBOR_MPV_INSTALL_GUARD {
-                let _ = SetWindowSubclass(message.hwnd, Some(mpv_size_guard_proc), HARBOR_MPV_SIZE_GUARD_ID, 0);
+                let _ = SetWindowSubclass(
+                    message.hwnd,
+                    Some(mpv_size_guard_proc),
+                    HARBOR_MPV_SIZE_GUARD_ID,
+                    0,
+                );
             }
         }
         CallNextHookEx(None, code, w, l)
@@ -3782,9 +3955,9 @@ mod geometry_tests {
         use windows::core::w;
         use windows::Win32::Foundation::RECT;
         use windows::Win32::UI::WindowsAndMessaging::{
-            CreateWindowExW, DestroyWindow, DispatchMessageW, FindWindowExW,
-            GetClientRect, PeekMessageW, ShowWindow, TranslateMessage, MSG,
-            PM_REMOVE, SW_MINIMIZE, SW_RESTORE, SW_SHOW, WS_OVERLAPPEDWINDOW,
+            CreateWindowExW, DestroyWindow, DispatchMessageW, FindWindowExW, GetClientRect,
+            PeekMessageW, ShowWindow, TranslateMessage, MSG, PM_REMOVE, SW_MINIMIZE, SW_RESTORE,
+            SW_SHOW, WS_OVERLAPPEDWINDOW,
         };
         fn pump(ms: u64) {
             let until = std::time::Instant::now() + std::time::Duration::from_millis(ms);
@@ -3801,10 +3974,20 @@ mod geometry_tests {
         }
         unsafe {
             let parent = CreateWindowExW(
-                Default::default(), w!("STATIC"), w!("Harbor mpv minimize regression"),
-                WS_OVERLAPPEDWINDOW, 100, 100, 960, 600,
-                None, None, None, None,
-            ).unwrap();
+                Default::default(),
+                w!("STATIC"),
+                w!("Harbor mpv minimize regression"),
+                WS_OVERLAPPEDWINDOW,
+                100,
+                100,
+                960,
+                600,
+                None,
+                None,
+                None,
+                None,
+            )
+            .unwrap();
             let _ = ShowWindow(parent, SW_SHOW);
             let mpv = libmpv2::Mpv::with_initializer(|init| {
                 init.set_property("wid", (parent.0 as isize).to_string())?;
@@ -3813,7 +3996,8 @@ mod geometry_tests {
                 init.set_property("ao", "null")?;
                 init.set_property("idle", "yes")?;
                 init.set_property("force-window", "yes")
-            }).unwrap();
+            })
+            .unwrap();
             let result = (|| -> Result<(), String> {
                 mpv.command("loadfile", &["av://lavfi:testsrc=size=320x180:rate=24"])
                     .map_err(|e| e.to_string())?;
@@ -3830,27 +4014,46 @@ mod geometry_tests {
                 let _ = ShowWindow(parent, SW_MINIMIZE);
                 pump(500);
                 let unguarded = size()?;
-                if unguarded == full { return Err("control did not reproduce mpv's parent resize".into()); }
+                if unguarded == full {
+                    return Err("control did not reproduce mpv's parent resize".into());
+                }
                 let _ = ShowWindow(parent, SW_RESTORE);
                 pump(500);
                 super::install_mpv_size_guard(child)?;
                 let restored = size()?;
                 let render_size = || -> Result<(i64, i64), String> {
-                    Ok((mpv.get_property::<i64>("osd-width").map_err(|e| e.to_string())?,
-                        mpv.get_property::<i64>("osd-height").map_err(|e| e.to_string())?))
+                    Ok((
+                        mpv.get_property::<i64>("osd-width")
+                            .map_err(|e| e.to_string())?,
+                        mpv.get_property::<i64>("osd-height")
+                            .map_err(|e| e.to_string())?,
+                    ))
                 };
                 let render_restored = render_size()?;
-                let before = mpv.get_property::<f64>("time-pos").map_err(|e| e.to_string())?;
+                let before = mpv
+                    .get_property::<f64>("time-pos")
+                    .map_err(|e| e.to_string())?;
                 for _ in 0..3 {
                     let _ = ShowWindow(parent, SW_MINIMIZE);
                     pump(500);
-                    if render_size()? != render_restored { return Err(format!("guarded renderer resize: {:?} != {render_restored:?}", render_size()?)); }
+                    if render_size()? != render_restored {
+                        return Err(format!(
+                            "guarded renderer resize: {:?} != {render_restored:?}",
+                            render_size()?
+                        ));
+                    }
                     let _ = ShowWindow(parent, SW_RESTORE);
                     pump(500);
-                    if size()? != restored { return Err("surface did not restore".into()); }
+                    if size()? != restored {
+                        return Err("surface did not restore".into());
+                    }
                 }
-                let after = mpv.get_property::<f64>("time-pos").map_err(|e| e.to_string())?;
-                if after <= before + 1.0 { return Err("playback clock stopped".into()); }
+                let after = mpv
+                    .get_property::<f64>("time-pos")
+                    .map_err(|e| e.to_string())?;
+                if after <= before + 1.0 {
+                    return Err("playback clock stopped".into());
+                }
                 println!("native mpv: unguarded={unguarded:?}, guarded={restored:?}, playback advanced {:.2}s", after - before);
                 Ok(())
             })();
@@ -3869,8 +4072,14 @@ mod event_backoff_tests {
 
     #[test]
     fn http_headers_preserve_commas_and_backslashes_in_mpv_string_lists() {
-        assert_eq!(super::mpv_header_field("Accept-Language", "en-US,en;q=0.9"), "Accept-Language: en-US\\,en;q=0.9");
-        assert_eq!(super::mpv_header_field("X-Path", r"one\two,three"), r"X-Path: one\\two\,three");
+        assert_eq!(
+            super::mpv_header_field("Accept-Language", "en-US,en;q=0.9"),
+            "Accept-Language: en-US\\,en;q=0.9"
+        );
+        assert_eq!(
+            super::mpv_header_field("X-Path", r"one\two,three"),
+            r"X-Path: one\\two\,three"
+        );
         assert_eq!(super::mpv_header_field("Accept", "*/*"), "Accept: */*");
     }
 

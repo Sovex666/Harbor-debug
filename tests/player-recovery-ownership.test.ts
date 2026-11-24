@@ -67,6 +67,7 @@ function recoveryHarness() {
   const probes: Array<ReturnType<typeof deferred>> = [],
     pickers: any[][] = [];
   const dependencies = {
+    tracePlayback() {},
     getPlaybackPosition: () => position,
     getPlaybackBuffered: () => 0,
     usePlaybackFlag: (read: () => boolean) => read(),

@@ -2,13 +2,13 @@
 
 ## Task Completion Requirements
 
-- Run `pnpm run check` (`vp check`) for files changed by the task before considering it complete.
-- Run `pnpm run typecheck` (`tsc --noEmit -p tsconfig.json`) after TypeScript changes.
+- During implementation, defer Node-based validation (tests, lint/format checks, and TypeScript typechecks) until final integration. Workers must not run these checks independently. The coordinating agent runs the full Node test suite, changed-file check, and typecheck once, sequentially, during final verification; rerun only checks affected by a subsequent fix. This avoids concurrent checks saturating the user's machine.
+- During final verification, run `pnpm run check` (`vp check`) for changed files.
+- During final verification, run `pnpm run typecheck` (`tsc --noEmit -p tsconfig.json`) after TypeScript changes.
   Never use `tsc -b` for a typecheck. It emits `vite.config.js` and `vite.config.d.ts`
   (both gitignored) and writing them restarts the dev server, killing hot reload.
   `tsc -b` belongs only in the `build` scripts, where emitting is intended.
 - Run `cargo check --manifest-path src-tauri/Cargo.toml` after Rust changes.
-- Run `pnpm tauri:build:linux-system` (`tauri build --config src-tauri/tauri.linux-system.conf.json`) to build the full Linux binary.
 - Test platform-specific changes on the affected platform when possible.
 - Do not leave warnings or errors introduced by the task unresolved.
 - If a repository-wide check fails on untouched files, record the baseline and do not reformat or refactor unrelated files.
@@ -85,3 +85,9 @@ Use references to understand established patterns. Do not copy large implementat
 - Do not silently change user-facing behavior.
 - Add comments only when they explain a non-obvious decision.
 - Never expose secrets, tokens, private URLs, or user data.
+
+## Browser test data
+
+- The user authorizes copying their real Harbor profile, settings, sign-in and library into a loopback-only browser test without asking again. Use that profile rather than guest or sanitized substitute data. This authorization does not disable platform-enforced approval checks.
+- Start the reusable test with `pnpm run diag:browser-profile`; it reuses `.diag/browser-inject.json`. Use `-Refresh` only when the Harbor profile changed. Keep snapshot files under `.diag/` and never commit them.
+- Preserve the production profile and credentials; the browser copy is disposable and must not write to the production Harbor directories.

@@ -1,8 +1,9 @@
 import { safeFetch } from "@/lib/safe-fetch";
 import { createRequestScheduler } from "@/lib/request-scheduler";
-import { createCatalogCache, isCatalogPath } from "./tmdb-catalog-cache";
+import { createCatalogCache, isCatalogPath, projectCatalogPage } from "./tmdb-catalog-cache";
 import { lruSet } from "@/lib/cache";
-import { cachedMedia, metadataCacheTtl, MEDIA_TTL } from "@/lib/media-cache";
+import { cachedMedia, metadataCacheTtl, MEDIA_TTL, onMediaCacheClear } from "@/lib/media-cache";
+import { cachedBrowsePage } from "@/lib/scoped-data-cache";
 
 export const TMDB = "https://api.themoviedb.org/3";
 export const IMG = "https://image.tmdb.org/t/p";
@@ -11,6 +12,12 @@ const tmdbRequests = createRequestScheduler({ concurrency: 6 });
 
 const tmdbInflight = new Map<string, Promise<unknown>>();
 const catalogCache = createCatalogCache();
+let catalogMemoryGeneration = 0;
+export const releaseTmdbCatalogMemory = () => {
+  catalogMemoryGeneration++;
+  catalogCache.clear();
+};
+onMediaCacheClear(releaseTmdbCatalogMemory);
 const missingResources = new Map<string, number>();
 
 let tmdbLanguage = "";
@@ -128,7 +135,11 @@ export async function get<T>(
   // The full URL scopes raw pages by API key, language, region, filters and page.
   // User-specific ranking and watched filtering still run afresh after retrieval.
   const cacheable = isCatalogPath(path);
-  const cached = cacheable ? catalogCache.get<T>(target) : undefined;
+  const firstPage = cacheable && (!params.page || params.page === "1");
+  const memoryGeneration = catalogMemoryGeneration;
+  // The durable cache owns first-page freshness and background refreshes.
+  // A second memory cache here could hide the refresh for another five minutes.
+  const cached = cacheable && !firstPage ? catalogCache.get<T>(target) : undefined;
   if (cached !== undefined) return cached;
   const shared = tmdbInflight.get(target);
   if (shared) {
@@ -140,24 +151,34 @@ export async function get<T>(
     /^(?:tv|movie)\/\d+(?:\/(?:season\/\d+(?:\/episode\/\d+)?(?:\/images)?|images|external_ids|translations))?$/.test(
       path,
     );
-  const run = metadata
-    ? cachedMedia<T>("tmdb-resource", [target], () => fetchWithRetry<T>(target, path), {
-        ttl: (value) => {
-          if (
-            path.endsWith("/images") &&
-            !Object.values(value as Record<string, unknown>).some(
-              (field) => Array.isArray(field) && field.length > 0,
-            )
-          )
-            return MEDIA_TTL.recent;
-          return metadataCacheTtl(value);
+  const run = firstPage
+    ? cachedBrowsePage<T>(
+        ["tmdb", target],
+        async () => {
+          const data = await fetchWithRetry<T>(target, path);
+          return projectCatalogPage(data) as T | null;
         },
-      })
-    : fetchWithRetry<T>(target, path);
+        (value) => projectCatalogPage(value) !== null,
+      )
+    : metadata
+      ? cachedMedia<T>("tmdb-resource", [target], () => fetchWithRetry<T>(target, path), {
+          ttl: (value) => {
+            if (
+              path.endsWith("/images") &&
+              !Object.values(value as Record<string, unknown>).some(
+                (field) => Array.isArray(field) && field.length > 0,
+              )
+            )
+              return MEDIA_TTL.recent;
+            return metadataCacheTtl(value);
+          },
+        })
+      : fetchWithRetry<T>(target, path);
   tmdbInflight.set(target, run);
   try {
     const data = await run;
-    if (cacheable) catalogCache.set(target, data);
+    if (cacheable && !firstPage && memoryGeneration === catalogMemoryGeneration)
+      catalogCache.set(target, data);
     return data;
   } finally {
     tmdbInflight.delete(target);

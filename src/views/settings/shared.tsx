@@ -52,6 +52,7 @@ export type SectionId =
   | "tv"
   | "bigPicture"
   | "storage"
+  | "debugging"
   | "trackers"
   | "updates"
   | "advanced";

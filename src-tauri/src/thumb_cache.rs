@@ -4,12 +4,16 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
     Mutex,
 };
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tauri::Manager;
 
 pub const MAX_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_FILES: usize = 50_000;
 const MAX_AGE: u64 = 30 * 24 * 3600;
+// A poster URL's bytes rarely change, and revisiting the network on every view
+// is the cost the user sees, so short origin lifetimes are raised to this floor.
+const MIN_LIFETIME: u64 = 7 * 24 * 3600;
+const TOUCH_CAP: usize = 2000;
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 static IO: Mutex<()> = Mutex::new(());
 static GENERATION: AtomicU64 = AtomicU64::new(0);
@@ -18,6 +22,7 @@ static SCHEMA: Mutex<Option<PathBuf>> = Mutex::new(None);
 static LEGACY: Mutex<bool> = Mutex::new(false);
 static LAST_SWEEP: AtomicU64 = AtomicU64::new(0);
 static WRITES: AtomicU64 = AtomicU64::new(0);
+static TOUCHED: Mutex<Vec<String>> = Mutex::new(Vec::new());
 
 pub fn generation() -> u64 {
     GENERATION.load(Ordering::SeqCst)
@@ -37,14 +42,27 @@ fn dir(app: &tauri::AppHandle) -> Option<PathBuf> {
 /// The pre-DB cache lived in a different directory and was capped at 256 MB.
 /// Remove it once after an upgrade instead of waiting for a manual clear.
 fn cleanup_legacy(app: &tauri::AppHandle) {
-    let Ok(mut cleaned) = LEGACY.lock() else { return };
+    // The review artifact must never touch the shared pre-DB cache. It is
+    // production-owned state and is intentionally left for the normal build.
+    if crate::context_review::is_context_review() {
+        return;
+    }
+    let Ok(mut cleaned) = LEGACY.lock() else {
+        return;
+    };
     if *cleaned {
         return;
     }
     if let Ok(cache) = app.path().cache_dir() {
-        let _ = std::fs::remove_dir_all(cache.join("harbor-thumb-cache"));
+        remove_legacy(&cache, false);
     }
     *cleaned = true;
+}
+
+fn remove_legacy(cache: &Path, review: bool) {
+    if !review {
+        let _ = std::fs::remove_dir_all(cache.join("harbor-thumb-cache"));
+    }
 }
 
 fn file_stem(url: &str, width: u32) -> String {
@@ -59,6 +77,9 @@ fn file_stem(url: &str, width: u32) -> String {
 fn database(dir: &Path) -> Option<Connection> {
     std::fs::create_dir_all(dir).ok()?;
     let db = Connection::open(dir.join("index.sqlite")).ok()?;
+    // Every lookup opens its own connection, so a concurrent writer should wait
+    // briefly rather than fail with SQLITE_BUSY.
+    let _ = db.busy_timeout(Duration::from_secs(5));
     // Schema setup and column probes are per-process work, not per-image work.
     let mut schema = SCHEMA.lock().ok()?;
     if schema.as_deref() != Some(dir) {
@@ -136,6 +157,14 @@ fn image_path(dir: &Path, file: &str) -> Option<PathBuf> {
     Some(dir.join(file))
 }
 
+/// A row is served until the later of its stored expiry and `MIN_LIFETIME` after
+/// it was written (`expires - lifetime`), so rows from short origin lifetimes
+/// are not re-fetched.
+fn effective_expiry(expires: u64, lifetime: u64) -> u64 {
+    let written = expires.saturating_sub(lifetime);
+    expires.max(written.saturating_add(MIN_LIFETIME))
+}
+
 /// Fresh cached file that can be served directly through the asset protocol.
 /// `.img` was the first-generation extension whose MIME type is unknown to the
 /// WebView, so those entries keep using the base64 path until revalidated.
@@ -145,21 +174,22 @@ pub fn cached_path(app: &tauri::AppHandle, url: &str, width: u32) -> Option<Stri
     let dir = dir(app)?;
     let db = database(&dir)?;
     let key = file_stem(url, width);
-    let (file, expires, bytes) = db
+    let (file, expires, bytes, lifetime) = db
         .query_row(
-            "SELECT file,expires,bytes FROM images WHERE key=?1",
+            "SELECT file,expires,bytes,lifetime FROM images WHERE key=?1",
             [&key],
             |row| {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, u64>(1)?,
                     row.get::<_, u64>(2)?,
+                    row.get::<_, u64>(3)?,
                 ))
             },
         )
         .optional()
         .ok()??;
-    if expires <= now() {
+    if effective_expiry(expires, lifetime) <= now() {
         return None;
     }
     let path = image_path(&dir, &file)?;
@@ -170,7 +200,61 @@ pub fn cached_path(app: &tauri::AppHandle, url: &str, width: u32) -> Option<Stri
     if std::fs::metadata(&path).ok()?.len() != bytes {
         return None;
     }
+    record_use(&key, &dir);
     Some(path.to_string_lossy().into_owned())
+}
+
+/// Queues a key served from disk so the sweep sees it as recently used. Writes
+/// are batched on a short-lived thread instead of one SQLite write per hit.
+fn record_use(key: &str, dir: &Path) {
+    let Ok(mut touched) = TOUCHED.lock() else {
+        return;
+    };
+    if touched.len() >= TOUCH_CAP || touched.iter().any(|queued| queued == key) {
+        return;
+    }
+    let first = touched.is_empty();
+    touched.push(key.to_string());
+    drop(touched);
+    if !first {
+        return;
+    }
+    let dir = dir.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("thumb-touch".into())
+        .spawn(move || flush_touched(&dir))
+        .is_ok();
+    if !spawned {
+        if let Ok(mut touched) = TOUCHED.lock() {
+            touched.clear();
+        }
+    }
+}
+
+fn flush_touched(dir: &Path) {
+    std::thread::sleep(Duration::from_secs(5));
+    let keys = match TOUCHED.lock() {
+        Ok(mut touched) => std::mem::take(&mut *touched),
+        Err(_) => return,
+    };
+    let Ok(_lock) = IO.lock() else {
+        return;
+    };
+    let Some(mut db) = database(dir) else {
+        return;
+    };
+    let stamp = now();
+    let threshold = stamp.saturating_sub(3600);
+    let Ok(tx) = db.transaction() else {
+        return;
+    };
+    for key in &keys {
+        let _ = tx.execute(
+            "UPDATE images SET accessed=?1 WHERE key=?2 AND accessed<?3",
+            params![stamp, key, threshold],
+        );
+    }
+    let _ = tx.commit();
 }
 
 fn checksum(bytes: &[u8]) -> String {
@@ -239,10 +323,11 @@ fn read_image(dir: &Path, url: &str, width: u32) -> Option<CachedImage> {
         "UPDATE images SET accessed=?1 WHERE key=?2 AND accessed<?3",
         params![now(), key, now().saturating_sub(60)],
     );
+    let expiry = effective_expiry(row.2, row.7);
     Some(CachedImage {
         bytes,
-        fresh: row.2 > now(),
-        max_age: row.2.saturating_sub(now()),
+        fresh: expiry > now(),
+        max_age: expiry.saturating_sub(now()),
         content_type: row.3,
         etag: row.4,
         modified: row.5,
@@ -269,7 +354,7 @@ pub fn image_lifetime(cache_control: Option<&str>) -> Option<u64> {
             }
         }
     }
-    Some(seconds)
+    Some(seconds.clamp(MIN_LIFETIME, MAX_AGE))
 }
 
 pub fn write_thumb(
@@ -489,7 +574,7 @@ pub fn clear_thumb_dir(app: &tauri::AppHandle) -> Result<(), String> {
         return Err("Image cache directory unavailable".to_string());
     }
     if let Ok(dir) = app.path().cache_dir() {
-        let _ = std::fs::remove_dir_all(dir.join("harbor-thumb-cache"));
+        remove_legacy(&dir, crate::context_review::is_context_review());
     }
     if let Ok(mut schema) = SCHEMA.lock() {
         *schema = None;
@@ -506,6 +591,26 @@ pub fn clear_thumb_dir(app: &tauri::AppHandle) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn review_legacy_cleanup_preserves_shared_sentinel() {
+        let root = std::env::temp_dir().join(format!(
+            "harbor-legacy-sentinel-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let legacy = root.join("harbor-thumb-cache");
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("sentinel"), b"untouched").unwrap();
+        remove_legacy(&root, true);
+        assert_eq!(
+            std::fs::read(legacy.join("sentinel")).unwrap(),
+            b"untouched"
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
     fn keys_scope_size_and_source() {
         let a = file_stem("https://example.com/a.png", 400);
         assert_eq!(a.len(), 64);
@@ -517,11 +622,21 @@ mod tests {
     #[test]
     fn respects_origin_cache_policy() {
         assert_eq!(image_lifetime(None), Some(MAX_AGE));
-        assert_eq!(image_lifetime(Some("public, max-age=60")), Some(60));
-        assert_eq!(image_lifetime(Some("no-cache")), Some(0));
-        assert_eq!(image_lifetime(Some("private, max-age=60")), Some(60));
+        assert_eq!(image_lifetime(Some("public, max-age=60")), Some(MIN_LIFETIME));
+        assert_eq!(image_lifetime(Some("no-cache")), Some(MIN_LIFETIME));
+        assert_eq!(image_lifetime(Some("private, max-age=60")), Some(MIN_LIFETIME));
         assert_eq!(image_lifetime(Some("no-store")), None);
-        assert_eq!(image_lifetime(Some("public, MAX-AGE=60")), Some(60));
+        assert_eq!(image_lifetime(Some("public, MAX-AGE=60")), Some(MIN_LIFETIME));
+        assert_eq!(image_lifetime(Some("max-age=99999999")), Some(MAX_AGE));
+    }
+
+    #[test]
+    fn effective_expiry_uses_the_later_of_expiry_and_floor() {
+        let written = 1_000_000;
+        assert_eq!(effective_expiry(written + 60, 60), written + MIN_LIFETIME);
+        assert_eq!(effective_expiry(written, 0), written + MIN_LIFETIME);
+        assert_eq!(effective_expiry(written + MAX_AGE, MAX_AGE), written + MAX_AGE);
+        assert_eq!(effective_expiry(0, 5), MIN_LIFETIME);
     }
 
     #[test]
@@ -563,11 +678,22 @@ mod tests {
             assert_eq!(cached.content_type, kind);
             assert_eq!(cached.etag.as_deref(), Some("version1"));
             assert_eq!(cached.revalidated_lifetime(None), Some(60));
-            assert_eq!(cached.revalidated_lifetime(Some("max-age=15")), Some(15));
+            assert_eq!(
+                cached.revalidated_lifetime(Some("max-age=15")),
+                Some(MIN_LIFETIME)
+            );
             assert_eq!(cached.revalidated_lifetime(Some("no-store")), None);
             assert!(cached.fresh);
             assert!(read_image(&dir, url, width + 1).is_none());
             write_image(&dir, url, width, &image, 0);
+            assert!(read_image(&dir, url, width).unwrap().fresh);
+            let db = database(&dir).unwrap();
+            db.execute(
+                "UPDATE images SET expires=?1 WHERE key=?2",
+                params![now().saturating_sub(MIN_LIFETIME + 1), file_stem(url, width)],
+            )
+            .unwrap();
+            drop(db);
             let stale = read_image(&dir, url, width).unwrap();
             assert!(!stale.fresh);
             assert_eq!(stale.revalidated_lifetime(None), Some(0));

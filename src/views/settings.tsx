@@ -16,7 +16,11 @@ import { requestTracker } from "./settings/tracker-request";
 import { SubTabsProvider, type SubTabReg } from "./settings/sub-tabs";
 import { SettingsSidebar } from "./settings/settings-sidebar";
 import { tabsFor } from "./settings/tab-registry";
-import { glideSettingsToTop, useSettingsAnchor, type SettingsAnchorRequest } from "./settings/anchor-navigation";
+import {
+  glideSettingsToTop,
+  useSettingsAnchor,
+  type SettingsAnchorRequest,
+} from "./settings/anchor-navigation";
 import { PageActionsProvider, type PageActionReg } from "./settings/page-actions";
 import { SettingsFooter } from "./settings/settings-footer";
 import { SettingsActiveContext, type SectionId } from "./settings/shared";
@@ -110,6 +114,9 @@ const BigPicturePanel = lazy(() =>
 const StoragePanel = lazy(() =>
   import("./settings/storage-panel").then((m) => ({ default: m.StoragePanel })),
 );
+const DebuggingPanel = lazy(() =>
+  import("./settings/debugging-panel").then((m) => ({ default: m.DebuggingPanel })),
+);
 const TrackersPanel = lazy(() =>
   import("./settings/trackers-panel").then((m) => ({ default: m.TrackersPanel })),
 );
@@ -150,6 +157,7 @@ const SECTION_PRELOAD: Partial<Record<SectionId, () => Promise<unknown>>> = {
   tv: () => import("./settings/tv-panel"),
   bigPicture: () => import("./settings/big-picture-panel"),
   storage: () => import("./settings/storage-panel"),
+  debugging: () => import("./settings/debugging-panel"),
   trackers: () => import("./settings/trackers-panel"),
   updates: () => import("./settings/updates-panel"),
   advanced: () => import("./settings/advanced-panel"),
@@ -301,6 +309,10 @@ const SECTION_META: Record<SectionId, { label: string; sub: string }> = {
     label: "Storage",
     sub: "See what Harbor stores on this computer and clear caches when you want the space back.",
   },
+  debugging: {
+    label: "Debugging",
+    sub: "Control local diagnostic capture, sessions, and self-tests.",
+  },
   trackers: {
     label: "Trackers",
     sub: "Services that record what you watch. Connect the ones you use and tune what each one sends.",
@@ -320,11 +332,19 @@ const CHROME_GAP = 4;
 const CHROME_FLOOR = 40;
 const CHROME_CEIL = 200;
 const CHROME_TOP_EDGE = 12;
+// Elements inside a parked or hidden view can never be visible top chrome. Skipping them before
+// getComputedStyle avoids forcing a style recalc of a just-parked page (Home→Settings froze ~1.2 s).
+// Not `.hidden`/`.invisible`: responsive chrome such as `hidden md:flex` must still count.
+function topChromeCandidates(shell: HTMLElement): HTMLElement[] {
+  return Array.from(document.querySelectorAll<HTMLElement>(CHROME_QUERY)).filter(
+    (el) => el !== shell && !shell.contains(el) && !el.closest("[data-layer-inactive]"),
+  );
+}
 
 function measureTopChrome(shell: HTMLElement): number {
   let bottom = 0;
-  for (const el of Array.from(document.querySelectorAll<HTMLElement>(CHROME_QUERY))) {
-    if (el === shell || shell.contains(el) || el.contains(shell)) continue;
+  for (const el of topChromeCandidates(shell)) {
+    if (el.contains(shell)) continue;
     const cs = getComputedStyle(el);
     if (cs.position !== "fixed" || cs.visibility === "hidden" || cs.opacity === "0") continue;
     const rect = el.getBoundingClientRect();
@@ -401,7 +421,11 @@ export function Settings({ visible = true }: { visible?: boolean }) {
 
   useLayoutEffect(() => {
     const shell = shellRef.current;
-    if (!shell) return;
+    // Settings stays mounted for a while after it is left, and this effect re-runs on every view
+    // switch. Measuring then forced a synchronous layout of the destination's freshly mounted tree
+    // inside its commit (about a second on Catalogs, Movies and Shows), so only a shown Settings
+    // measures.
+    if (!shell || !visible) return;
     let raf = 0;
     let last = -1;
     const apply = () => {
@@ -419,9 +443,7 @@ export function Settings({ visible = true }: { visible?: boolean }) {
     const ro = new ResizeObserver(schedule);
     ro.observe(document.documentElement);
     ro.observe(shell);
-    for (const el of Array.from(document.querySelectorAll<HTMLElement>(CHROME_QUERY))) {
-      if (el !== shell && !shell.contains(el)) ro.observe(el);
-    }
+    for (const el of topChromeCandidates(shell)) ro.observe(el);
     window.addEventListener("resize", schedule);
     schedule();
     return () => {
@@ -436,6 +458,7 @@ export function Settings({ visible = true }: { visible?: boolean }) {
     settings.customCss,
     topKind,
     viewChromeHidden,
+    visible,
   ]);
 
   const pendingTab = useRef<string | null>(null);
@@ -743,6 +766,7 @@ export function Settings({ visible = true }: { visible?: boolean }) {
                       {active === "bigPicture" && <BigPicturePanel />}
 
                       {active === "storage" && <StoragePanel />}
+                      {active === "debugging" && <DebuggingPanel />}
 
                       {active === "trackers" && <TrackersPanel />}
 

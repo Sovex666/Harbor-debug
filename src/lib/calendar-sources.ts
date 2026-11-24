@@ -1,3 +1,11 @@
+import { effectiveTmdbLanguage } from "./providers/tmdb/tmdb-client";
+import { CalendarCache } from "./calendar-cache";
+import {
+  calendarScopeKey,
+  invalidateCalendarCaches,
+  registerCalendarCache,
+} from "./calendar-cache-scope";
+import { mapCalendarLimit } from "./calendar-scheduler";
 import { meta as cinemetaMeta } from "./cinemeta";
 import {
   fetchAnticipatedMovies,
@@ -7,68 +15,46 @@ import {
 } from "./trakt/calendar";
 import type { CalendarItem } from "./calendar";
 import { localDateTimeFromIso } from "./calendar-time";
-import { resolveSavedCalendar, type SavedCandidate } from "./calendar-library";
-import { fetchWatchlist as fetchSimklWatchlist, fetchWatchingItems } from "./simkl/watchlist";
-import { fetchSimklCdnCalendar } from "./simkl/calendar";
+import {
+  resolveSavedCalendar,
+  prepareCalendarCandidates,
+  type SavedCandidate,
+  type CalendarResolveOptions,
+} from "./calendar-library";
+import {
+  fetchWatchlist as fetchSimklWatchlist,
+  fetchWatchingItems,
+  invalidateWatchlistCache as invalidateSimklWatchlist,
+} from "./simkl/watchlist";
+import { clearCalendarCache as clearSimklCdnCache, fetchSimklCdnCalendar } from "./simkl/calendar";
 import { isAuthenticated as simklConnected } from "./simkl/session";
 import { fetchAniListAiringCalendar as fetchAniListAiring } from "./anilist/airing";
 import { fetchDubSchedule } from "./providers/anime-dub-sub";
 
 export { fetchLibraryCalendar } from "./calendar-library";
 
-interface CacheEntry {
-  items: CalendarItem[];
-  timestamp: number;
-}
-
-const calendarCache = new Map<string, CacheEntry>();
-const calendarInFlight = new Map<string, Promise<CalendarItem[]>>();
-const CACHE_STALE_MS = 30 * 60 * 1000;
+const sourceCache = new CalendarCache<CalendarItem[]>(24, 30 * 60 * 1000, true);
+const personalSourceCache = new CalendarCache<CalendarItem[]>(12, 60 * 1000);
+export const subscribeCalendarSourceCache = (listener: () => void) =>
+  sourceCache.subscribe(listener);
+export const calendarSourceCacheRevision = (key?: string) =>
+  key ? sourceCache.getRevision(key) : 0;
+registerCalendarCache(() => {
+  sourceCache.clear();
+  personalSourceCache.clear();
+  invalidateSimklWatchlist();
+});
 
 function withCalendarCache(
-  cacheKey: string,
+  key: string,
   fetcher: () => Promise<CalendarItem[]>,
 ): Promise<CalendarItem[]> {
-  const cached = calendarCache.get(cacheKey);
-  const now = Date.now();
-
-  if (cached) {
-    if (now - cached.timestamp >= CACHE_STALE_MS) {
-      if (!calendarInFlight.has(cacheKey)) {
-        const promise = fetcher()
-          .then((items) => {
-            calendarCache.set(cacheKey, { items, timestamp: Date.now() });
-            return items;
-          })
-          .catch(() => cached.items)
-          .finally(() => {
-            calendarInFlight.delete(cacheKey);
-          });
-        calendarInFlight.set(cacheKey, promise);
-      }
-    }
-    return Promise.resolve(cached.items);
-  }
-
-  if (calendarInFlight.has(cacheKey)) {
-    return calendarInFlight.get(cacheKey)!;
-  }
-
-  const promise = fetcher()
-    .then((items) => {
-      calendarCache.set(cacheKey, { items, timestamp: Date.now() });
-      return items;
-    })
-    .finally(() => {
-      calendarInFlight.delete(cacheKey);
-    });
-  calendarInFlight.set(cacheKey, promise);
-  return promise;
+  // Strict providers reject failures; an empty success is authoritative too.
+  return sourceCache.fetch(key, fetcher);
 }
 
 export function clearCalendarSourceCache() {
-  calendarCache.clear();
-  calendarInFlight.clear();
+  invalidateCalendarCaches();
 }
 
 export async function fetchSimklPremieresCalendar(
@@ -76,7 +62,10 @@ export async function fetchSimklPremieresCalendar(
   month: number,
 ): Promise<CalendarItem[]> {
   const cacheKey = `simkl-premieres:${year}-${month}`;
-  return withCalendarCache(cacheKey, () => fetchSimklCdnCalendar(year, month).catch(() => []));
+  return withCalendarCache(cacheKey, () => {
+    clearSimklCdnCache();
+    return fetchSimklCdnCalendar(year, month, true);
+  });
 }
 
 export async function fetchAniListAiringCalendar(
@@ -84,16 +73,16 @@ export async function fetchAniListAiringCalendar(
   month: number,
 ): Promise<CalendarItem[]> {
   const cacheKey = `anilist-airing:${year}-${month}`;
-  return withCalendarCache(cacheKey, () => fetchAniListAiring(year, month).catch(() => []));
+  return withCalendarCache(cacheKey, () => fetchAniListAiring(year, month, true));
 }
 
 export async function fetchAnimeDubCalendar(year: number, month: number): Promise<CalendarItem[]> {
   const cacheKey = `anime-dub:${year}-${month}`;
-  return withCalendarCache(cacheKey, () => mapDubFeedToCalendar(year, month).catch(() => []));
+  return withCalendarCache(cacheKey, () => mapDubFeedToCalendar(year, month));
 }
 
 async function mapDubFeedToCalendar(year: number, month: number): Promise<CalendarItem[]> {
-  const entries = await fetchDubSchedule();
+  const entries = await fetchDubSchedule(true);
   const out: CalendarItem[] = [];
   const seen = new Set<string>();
   for (const e of entries) {
@@ -135,42 +124,55 @@ async function mapDubFeedToCalendar(year: number, month: number): Promise<Calend
 export async function fetchSimklCalendar(
   year: number,
   month: number,
-  opts: { tmdbKey: string },
+  opts: CalendarResolveOptions,
 ): Promise<CalendarItem[]> {
   if (!simklConnected()) return [];
-  const cacheKey = `simkl-calendar:${year}-${month}`;
-  return withCalendarCache(cacheKey, async () => {
-    const [watchlist, watching] = await Promise.all([
-      fetchSimklWatchlist().catch(() => []),
-      fetchWatchingItems().catch(() => []),
-    ]);
-    const items = [...watchlist, ...watching];
-    const candidates: SavedCandidate[] = [];
-    const seenIds = new Set<string>();
-    for (const it of items) {
-      const id =
-        it.ids.imdb ??
-        (it.ids.tmdb
-          ? it.type === "movie"
-            ? `tmdb:movie:${it.ids.tmdb}`
-            : `tmdb:tv:${it.ids.tmdb}`
-          : it.ids.mal
-            ? `mal:${it.ids.mal}`
-            : null);
-      if (!id) continue;
-      if (seenIds.has(id)) continue;
-      seenIds.add(id);
-      candidates.push({
-        id,
-        type: it.type === "show" ? "series" : "movie",
-        name: it.title,
-        mtime: 0,
-        temp: false,
-      });
-    }
-    if (candidates.length === 0) return [];
-    return resolveSavedCalendar(candidates, year, month, opts);
-  });
+  const cacheKey = JSON.stringify([
+    calendarScopeKey(),
+    "simkl-calendar",
+    year,
+    month,
+    opts.tmdbKey,
+    effectiveTmdbLanguage(),
+  ]);
+  const fetchRows = async () => {
+    const prepared = await prepareCalendarCandidates(opts, async () => {
+      const [watchlist, watching] = await Promise.all([
+        fetchSimklWatchlist(true),
+        fetchWatchingItems(true),
+      ]);
+      const items = [...watchlist, ...watching];
+      const candidates: SavedCandidate[] = [];
+      const seenIds = new Set<string>();
+      for (const it of items) {
+        const id =
+          it.ids.imdb ??
+          (it.ids.tmdb
+            ? it.type === "movie"
+              ? `tmdb:movie:${it.ids.tmdb}`
+              : `tmdb:tv:${it.ids.tmdb}`
+            : it.ids.mal
+              ? `mal:${it.ids.mal}`
+              : null);
+        if (!id) continue;
+        if (seenIds.has(id)) continue;
+        seenIds.add(id);
+        candidates.push({
+          id,
+          type: it.type === "show" ? "series" : "movie",
+          name: it.title,
+          mtime: 0,
+          temp: false,
+        });
+      }
+      return candidates;
+    });
+    if (prepared.candidates.length === 0) return [];
+    return resolveSavedCalendar(prepared.candidates, year, month, prepared.options);
+  };
+  return opts.onSnapshot || opts.signal
+    ? fetchRows()
+    : personalSourceCache.fetch(cacheKey, fetchRows);
 }
 
 const TRAKT_MAX_FORWARD_MONTHS = 6;
@@ -191,14 +193,21 @@ function isAnimationGenre(genres: string[] | undefined): boolean {
   return genres.some((g) => wanted.includes(g.toLowerCase()));
 }
 
-export async function fetchTraktCalendar(year: number, month: number): Promise<CalendarItem[]> {
+export async function fetchTraktCalendar(
+  year: number,
+  month: number,
+  strict = false,
+): Promise<CalendarItem[]> {
   const today = new Date();
   const cur = new Date(year, month, 1);
   const fwdMonths =
     (cur.getFullYear() - today.getFullYear()) * 12 + (cur.getMonth() - today.getMonth());
   if (fwdMonths < 0 || fwdMonths > TRAKT_MAX_FORWARD_MONTHS) return [];
   const days = Math.max(31, (fwdMonths + 1) * 31);
-  const [eps, mvs] = await Promise.all([fetchUpcomingEpisodes(days), fetchUpcomingMovies(days)]);
+  const [eps, mvs] = await Promise.all([
+    fetchUpcomingEpisodes(days, strict),
+    fetchUpcomingMovies(days, strict),
+  ]);
 
   const epsInMonth = eps
     .map((ep) => ({ ep, ...localDateTimeFromIso(ep.airDate) }))
@@ -214,8 +223,8 @@ export async function fetchTraktCalendar(year: number, month: number): Promise<C
     ...new Set(mvsInMonth.map((x) => x.m.ids.imdb).filter((x): x is string => !!x)),
   ];
   const [showMetas, movieMetas] = await Promise.all([
-    Promise.all(showIds.map((id) => cinemetaMeta("series", id).catch(() => null))),
-    Promise.all(movieIds.map((id) => cinemetaMeta("movie", id).catch(() => null))),
+    mapCalendarLimit(showIds, 6, (id) => cinemetaMeta("series", id).catch(() => null)),
+    mapCalendarLimit(movieIds, 6, (id) => cinemetaMeta("movie", id).catch(() => null)),
   ]);
   const showMeta = new Map(showIds.map((id, i) => [id, showMetas[i]] as const));
   const movieMeta = new Map(movieIds.map((id, i) => [id, movieMetas[i]] as const));
@@ -272,20 +281,20 @@ export async function fetchTraktCalendar(year: number, month: number): Promise<C
 export async function fetchAnticipatedCalendar(
   year: number,
   month: number,
+  strict = false,
 ): Promise<CalendarItem[]> {
-  const [shows, mvs] = await Promise.all([fetchAnticipatedShows(), fetchAnticipatedMovies()]);
+  const [shows, mvs] = await Promise.all([
+    fetchAnticipatedShows(strict),
+    fetchAnticipatedMovies(strict),
+  ]);
   const inMonthShows = shows.filter((s) => inMonth(s.firstAired, year, month));
   const inMonthMovies = mvs.filter((m) => inMonth(m.released, year, month));
   const [showMetas, movieMetas] = await Promise.all([
-    Promise.all(
-      inMonthShows.map((s) =>
-        s.ids.imdb ? cinemetaMeta("series", s.ids.imdb).catch(() => null) : Promise.resolve(null),
-      ),
+    mapCalendarLimit(inMonthShows, 6, (s) =>
+      s.ids.imdb ? cinemetaMeta("series", s.ids.imdb).catch(() => null) : Promise.resolve(null),
     ),
-    Promise.all(
-      inMonthMovies.map((m) =>
-        m.ids.imdb ? cinemetaMeta("movie", m.ids.imdb).catch(() => null) : Promise.resolve(null),
-      ),
+    mapCalendarLimit(inMonthMovies, 6, (m) =>
+      m.ids.imdb ? cinemetaMeta("movie", m.ids.imdb).catch(() => null) : Promise.resolve(null),
     ),
   ]);
   const out: CalendarItem[] = [];

@@ -22,7 +22,8 @@ import { externalToKitsu, kitsuToImdb, kitsuToTvdb } from "@/lib/providers/anime
 import { tmdbLocalizedPoster } from "@/lib/providers/tmdb/tmdb-images";
 import { sizeImageUrl, qualityMultiplier } from "@/lib/img-size";
 import { shouldLocalizePosters } from "@/lib/providers/tmdb/tmdb-image-lang";
-import { useProxiedImageSrc } from "@/lib/remote-image-proxy";
+import { isParkedArtworkWarm, useProxiedImageSrc } from "@/lib/remote-image-proxy";
+import { beginImageReadiness } from "@/lib/image-readiness";
 import { observeResize, observeWithin } from "@/lib/visibility";
 import { noteProbe, recordRenderCause } from "@/lib/render-cause";
 import { ScrollRootContext } from "./row";
@@ -40,6 +41,28 @@ function rememberDecoded(url: string) {
   if (decodedPosters.size >= DECODED_POSTER_CAP) decodedPosters.clear();
   decodedPosters.add(url);
 }
+
+// The target px a card last settled on, by source and, as a fallback for a source not seen yet,
+// by ratio and quality. A remounted card then asks for the cached sized URL on its first render
+// rather than waiting for its ResizeObserver to report the box.
+const POSTER_SIZE_CAP = 4000;
+const posterSizeBySrc = new Map<string, number>();
+const posterSizeByRatio = new Map<string, number>();
+function rememberPosterSize(src: string | undefined, ratio: Ratio, qMult: number, px: number) {
+  if (src) {
+    posterSizeBySrc.delete(src);
+    posterSizeBySrc.set(src, px);
+    while (posterSizeBySrc.size > POSTER_SIZE_CAP)
+      posterSizeBySrc.delete(posterSizeBySrc.keys().next().value!);
+  }
+  posterSizeByRatio.set(`${ratio}|${qMult}`, px);
+}
+function seedPosterPx(src: string | undefined, ratio: Ratio, qMult: number): number {
+  if (qMult === 0 || !src) return 0;
+  return posterSizeBySrc.get(src) ?? posterSizeByRatio.get(`${ratio}|${qMult}`) ?? 0;
+}
+// A parked (warmed) poster never gets a box to measure, so one with no remembered size loads this rung.
+const PARKED_WARM_PX = 400;
 
 export function useLocalizedPoster(metaId: string): {
   url: string | undefined;
@@ -289,11 +312,12 @@ function PosterBody({
   const effect = settings.posterEffect;
   const pageScrollRoot = useContext(ScrollRootContext);
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const [imageEnabled, setImageEnabled] = useState(!lazy);
-  const [targetPx, setTargetPx] = useState(0);
-  const targetPxRef = useRef(0);
-  const measuredPxRef = useRef(0);
+  const [enteredViewport, setEnteredViewport] = useState(!lazy);
+  const [nearViewport, setNearViewport] = useState(false);
   const qMult = qualityMultiplier(settings.posterQuality);
+  const [targetPx, setTargetPx] = useState(() => seedPosterPx(src, ratio, qMult));
+  const targetPxRef = useRef(targetPx);
+  const measuredPxRef = useRef(0);
   const rawCandidates = [src, ...(fallbacks ?? [])].filter((u): u is string => !!u);
   const rawCandidatesRef = useRef(rawCandidates);
   rawCandidatesRef.current = rawCandidates;
@@ -306,7 +330,6 @@ function PosterBody({
     if (!el) return;
     const onNear = (e: IntersectionObserverEntry) => {
       const near = e.isIntersecting;
-      if (near) setImageEnabled(true);
       el.toggleAttribute("data-near", near);
       el.toggleAttribute("data-idle", !near);
       const img = el.querySelector<HTMLImageElement>("img.harbor-poster-img");
@@ -314,9 +337,32 @@ function PosterBody({
       if (near) img.fetchPriority = "high";
       else img.removeAttribute("fetchpriority");
     };
-    return pageScrollRoot
+    const stopNear = pageScrollRoot
       ? observeWithin(el, "1200px", onNear, pageScrollRoot)
       : observeWithin(el, "1200px", onNear);
+    const stopVisible = observeWithin(
+      el,
+      "0px",
+      (entry) => {
+        setEnteredViewport(entry.isIntersecting);
+      },
+      pageScrollRoot ?? undefined,
+    );
+    const stopNearby = observeWithin(
+      el,
+      "400px",
+      (entry) => {
+        // Art already on screen does not need a priority change, so skip the re-render.
+        if (shownRef.current && shownRef.current === currentRef.current) return;
+        setNearViewport(entry.isIntersecting);
+      },
+      pageScrollRoot ?? undefined,
+    );
+    return () => {
+      stopNear();
+      stopVisible();
+      stopNearby();
+    };
   }, [pageScrollRoot]);
   useEffect(() => {
     if (qMult === 0) return;
@@ -331,6 +377,8 @@ function PosterBody({
       const t = Math.ceil(need * Math.min(2, window.devicePixelRatio || 1) * qMult);
       measuredPxRef.current = t;
       const prev = targetPxRef.current;
+      // Recorded on every measurement, so a card whose size is not larger still remembers its own src.
+      rememberPosterSize(rawCandidatesRef.current[0], ratio, qMult, Math.max(prev, t));
       if (t <= prev) return;
       // Expansion animates the width every frame. Only render when it actually selects
       // different image bytes, rather than once per pixel within the same CDN size rung.
@@ -350,12 +398,15 @@ function PosterBody({
     const measured = measuredPxRef.current;
     if (qMult === 0 || measured <= targetPxRef.current) return;
     targetPxRef.current = measured;
+    rememberPosterSize(src, ratio, qMult, measured);
     setTargetPx(measured);
-  }, [rawSig, qMult]);
+  }, [rawSig, qMult, src, ratio]);
+  const parkedWarm = isParkedArtworkWarm();
+  const loadPx = targetPx > 0 ? targetPx : parkedWarm && qMult !== 0 ? PARKED_WARM_PX : 0;
   const candidates =
-    qMult === 0 || targetPx <= 0
+    qMult === 0 || loadPx <= 0
       ? rawCandidates
-      : rawCandidates.map((u) => sizeImageUrl(u, targetPx));
+      : rawCandidates.map((u) => sizeImageUrl(u, loadPx));
   const sig = candidates.join("|");
   const [idx, setIdx] = useState(0);
   const candidatesRef = useRef(candidates);
@@ -367,7 +418,13 @@ function PosterBody({
   const failedRef = useRef<Set<string>>(new Set());
   const firedRef = useRef(false);
   const failBurstRef = useRef<{ t: number; n: number }>({ t: 0, n: 0 });
-  const shownRef = useRef<string | undefined>(undefined);
+  // Art that already decoded this session starts as shown, so the first paint has no shimmer.
+  // The layout effect further down still adds `data-loaded` once the proxied src is ready.
+  const [initialShown] = useState(() => {
+    const first = candidates[0];
+    return first && decodedPosters.has(first) ? first : undefined;
+  });
+  const shownRef = useRef<string | undefined>(initialShown);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
 
@@ -413,17 +470,24 @@ function PosterBody({
   const exhausted = cursor >= candidates.length;
   // Remote plain-HTTP images (e.g. a Suwayomi server on a VPS) are mixed-content
   // blocked by the WebView; resolve them to a same-origin blob URL.
+  // Scheduling orders the work, and the scheduler holds jobs whose layer is parked (`layerRef`,
+  // read from the DOM, so a tab switch re-renders no poster), so every card can start now:
+  // on-screen first, then the 400px band, then the rest in the background.
   const currentSrc = useProxiedImageSrc(current, {
     forceProxy: /^https?:\/\//.test(current ?? ""),
     persistent: true,
-    enabled: imageEnabled && (qMult === 0 || targetPx > 0),
+    enabled: qMult === 0 || loadPx > 0,
     originalSize: true,
+    layerRef: rootRef,
+    warmWhileParked: true,
+    priority: enteredViewport ? "visible" : nearViewport ? "near" : "background",
   });
   const displayedSrc = useProxiedImageSrc(displayed, {
     forceProxy: /^https?:\/\//.test(displayed ?? ""),
     persistent: true,
-    enabled: imageEnabled,
     originalSize: true,
+    layerRef: rootRef,
+    priority: "visible",
   });
   const stateCauseRef = useRef<{
     targetPx: number;
@@ -512,6 +576,7 @@ function PosterBody({
     (el: HTMLImageElement | null) => {
       imgElRef.current = el;
       if (!el) return;
+      beginImageReadiness(el);
       if (el.complete) {
         if (el.naturalWidth > 0) markLoaded(currentRef.current);
         else if (currentRef.current) fail(currentRef.current);
@@ -564,6 +629,19 @@ function PosterBody({
     <div
       ref={rootRef}
       data-poster-effect={effect}
+      data-poster-state={exhausted ? "unavailable" : "pending"}
+      // Diagnostics: which gate a pending poster is waiting on. A parked layer's hold lives in the
+      // image scheduler, so a poster waiting on it reports "source".
+      data-poster-wait={
+        exhausted
+          ? undefined
+          : qMult !== 0 && targetPx <= 0
+            ? "unsized"
+            : !currentSrc
+              ? "source"
+              : "image"
+      }
+      data-poster-fallback={cursor || undefined}
       className={`harbor-poster your-card relative w-full overflow-hidden rounded-[var(--poster-radius,12px)] ${className}`}
       style={showPlate ? { background: gradient(hue) } : undefined}
     >
@@ -579,7 +657,7 @@ function PosterBody({
           className="absolute inset-0 h-full w-full object-cover"
         />
       )}
-      {current && currentSrc && (qMult === 0 || targetPx > 0) && (
+      {current && currentSrc && (qMult === 0 || loadPx > 0) && (
         <img
           key={current}
           ref={handleImgRef}

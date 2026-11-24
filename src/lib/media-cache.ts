@@ -2,6 +2,8 @@ import { mediaCacheStore, type MediaCacheRecord, type MediaCacheStore } from "./
 
 export const MEDIA_CACHE_DISK_BYTES = 512 * 1024 * 1024;
 const MEMORY_BYTES = 16 * 1024 * 1024;
+const isBrowseData = (key: string) =>
+  key.startsWith("v1:browse-catalog:") || key.startsWith("v1:library-read-");
 export const MEDIA_TTL = {
   recent: 60 * 60_000,
   episodes: 12 * 60 * 60_000,
@@ -21,6 +23,9 @@ export type MediaCachePolicy<T> = {
   staleWhileRevalidate?: boolean;
   fallbackOnError?: boolean;
   valid?: (value: T) => boolean;
+  maxBytes?: number;
+  /** Checked again at the serialized write boundary after invalidation. */
+  current?: () => boolean;
 };
 
 export type MediaCacheResult<T> = {
@@ -98,6 +103,15 @@ export function createMediaCache(
       if (!first) break;
       memory.delete(first[0]);
       memoryBytes -= first[1].bytes;
+    }
+    let browseBytes = 0;
+    for (const entry of memory.values()) if (isBrowseData(entry.key)) browseBytes += entry.bytes;
+    for (const [key, entry] of memory) {
+      if (browseBytes <= 8 * 1024 * 1024) break;
+      if (!isBrowseData(key)) continue;
+      memory.delete(key);
+      memoryBytes -= entry.bytes;
+      browseBytes -= entry.bytes;
     }
   }
 
@@ -184,7 +198,13 @@ export function createMediaCache(
     } catch {
       return false;
     }
-    if (bytes > diskLimit || value == null || policy.valid?.(value) === false) return false;
+    if (
+      policy.current?.() === false ||
+      bytes > Math.min(diskLimit, policy.maxBytes ?? Infinity) ||
+      value == null ||
+      policy.valid?.(value) === false
+    )
+      return false;
     const ttl =
       typeof policy.ttl === "function" ? policy.ttl(value) : (policy.ttl ?? MEDIA_TTL.episodes);
     const record: MediaCacheRecord<T> = {
@@ -199,29 +219,65 @@ export function createMediaCache(
     remember(record);
     pendingWrites.set(key, record);
     return enqueue(async () => {
-      if (scope !== generation) return false;
+      if (scope !== generation || policy.current?.() === false) return false;
       await ensureDiskTotals().catch(() => {});
+      if (scope !== generation || policy.current?.() === false) return false;
       let previous = diskSizes.get(key) ?? 0;
       let saved = await store.put(record).catch(() => false);
-      if (!saved && scope === generation) {
+      if (!saved && scope === generation && policy.current?.() !== false) {
         await pruneDisk(true);
         previous = diskSizes.get(key) ?? 0;
-        if (scope === generation) saved = await store.put(record).catch(() => false);
+        if (scope === generation && policy.current?.() !== false)
+          saved = await store.put(record).catch(() => false);
       }
       if (saved) {
         counters.writes++;
         diskSizes.set(key, bytes);
         diskBytes += bytes - previous;
         writesSincePrune++;
+        // Normal warming already has an accurate disk index from
+        // `ensureDiskTotals()`. Do not enumerate IndexedDB after every page;
+        // that turned a warm pass into one full disk scan per category. The
+        // ordered scan is needed only when the browse budget is exceeded.
+        if (isBrowseData(key)) {
+          let browseCount = 0;
+          let browseBytes = 0;
+          for (const [entryKey, size] of diskSizes) {
+            if (!isBrowseData(entryKey)) continue;
+            browseCount++;
+            browseBytes += size;
+          }
+          if (browseCount > 128 || browseBytes > 64 * 1024 * 1024) {
+            const entries = (await store.list()).filter((entry) => isBrowseData(entry.key));
+            entries.sort((a, b) => a.accessedAt - b.accessedAt);
+            let total = entries.reduce((sum, entry) => sum + entry.bytes, 0);
+            const remove: string[] = [];
+            while (entries.length > 128 || total > 64 * 1024 * 1024) {
+              const entry = entries.shift()!;
+              remove.push(entry.key);
+              total -= entry.bytes;
+            }
+            await store.remove(remove);
+            for (const removed of remove) {
+              diskBytes -= diskSizes.get(removed) ?? 0;
+              diskSizes.delete(removed);
+            }
+          }
+        }
         if (diskBytes > diskLimit || writesSincePrune >= 32) {
           writesSincePrune = 0;
           await pruneDisk();
         }
       } else counters.errors++;
       return saved;
-    }).finally(() => {
-      if (pendingWrites.get(key) === record) pendingWrites.delete(key);
-    });
+    })
+      .catch(() => {
+        counters.errors++;
+        return false;
+      })
+      .finally(() => {
+        if (pendingWrites.get(key) === record) pendingWrites.delete(key);
+      });
   }
 
   async function load<T>(
@@ -231,11 +287,11 @@ export function createMediaCache(
   ): Promise<MediaCacheResult<T>> {
     const scope = generation;
     await clearing;
-    if (scope !== generation) return { value: null };
+    if (scope !== generation || policy.current?.() === false) return { value: null };
     let record = memory.get(key) ?? pendingWrites.get(key) ?? null;
     if (!record) {
       record = await store.get(key).catch(() => null);
-      if (scope !== generation) return { value: null };
+      if (scope !== generation || policy.current?.() === false) return { value: null };
       record = memory.get(key) ?? pendingWrites.get(key) ?? record;
       if (validRecord(record, key)) {
         counters.diskHits++;
@@ -259,6 +315,8 @@ export function createMediaCache(
         const accessedAt = record.accessedAt;
         void enqueue(async () => {
           if (scope === generation) await store.touch?.(key, accessedAt);
+        }).catch(() => {
+          counters.errors++;
         });
       }
       remember(record);
@@ -290,13 +348,13 @@ export function createMediaCache(
             throw new Error("Incomplete media metadata");
           }
           const storedAt = now();
-          if (scope === generation) {
+          if (scope === generation && policy.current?.() !== false) {
             retryAt.delete(key);
             void save(key, value, policy, storedAt).catch(() => {
               counters.errors++;
             });
           }
-          return { value, storedAt };
+          return { value: policy.current?.() === false ? null : value, storedAt };
         } catch {
           counters.errors++;
           if (!invalid && scope === generation) {
@@ -334,6 +392,38 @@ export function createMediaCache(
     save,
     generation: () => generation,
     flush: () => writes,
+    releaseMemory(prefix: string) {
+      for (const [key, entry] of memory) {
+        if (!key.startsWith(prefix)) continue;
+        memory.delete(key);
+        memoryBytes -= entry.bytes;
+      }
+    },
+    async readValue<T>(key: string): Promise<T | null> {
+      const scope = generation;
+      await clearing;
+      const record =
+        memory.get(key) ?? pendingWrites.get(key) ?? (await store.get(key).catch(() => null));
+      if (scope !== generation || !validRecord(record, key) || record.staleUntil <= now())
+        return null;
+      return copy(record.value as T);
+    },
+    removePrefix(prefix: string) {
+      this.releaseMemory(prefix);
+      for (const key of inFlight.keys()) if (key.startsWith(prefix)) inFlight.delete(key);
+      for (const key of pendingWrites.keys()) if (key.startsWith(prefix)) pendingWrites.delete(key);
+      for (const key of retryAt.keys()) if (key.startsWith(prefix)) retryAt.delete(key);
+      return enqueue(async () => {
+        const keys = (await store.list())
+          .filter((entry) => entry.key.startsWith(prefix))
+          .map((entry) => entry.key);
+        await store.remove(keys);
+        for (const key of keys) {
+          diskBytes -= diskSizes.get(key) ?? 0;
+          diskSizes.delete(key);
+        }
+      });
+    },
     async peek(key: string) {
       const scope = generation;
       await clearing;
@@ -455,6 +545,16 @@ export const clearMediaCache = () => {
   return cleared;
 };
 export const mediaCacheStats = () => cache.stats();
+export const releaseBrowseCacheMemory = () => cache.releaseMemory("v1:browse-catalog:");
+export const releasePersonalCacheMemory = () => cache.releaseMemory("v1:library-read-");
+export async function readMediaValue<T>(
+  namespace: string,
+  scope: readonly unknown[],
+): Promise<T | null> {
+  const key = await mediaCacheKey(namespace, scope);
+  return key ? cache.readValue<T>(key) : null;
+}
+export const removeMediaNamespaces = (prefix: string) => cache.removePrefix(`v1:${prefix}`);
 
 export function episodeCacheTtl(
   rows: readonly {

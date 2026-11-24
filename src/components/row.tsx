@@ -539,15 +539,28 @@ export function Row({
     track.addEventListener("pointerdown", markInteracted);
     track.addEventListener("keydown", markInteracted);
     let resetRaf: number | null = null;
+    // A reset that arrived while this row's page was parked. Writing scrollLeft inside a
+    // content-visibility:hidden layer forces style and layout of that locked subtree, so the write
+    // waits until the row is reachable again: a parked layer is skipped for hit testing and focus,
+    // so the first pointer or focus entering the row (track or arrows) means the page is active.
+    let pendingReset = false;
+    const applyPendingReset = () => {
+      if (!pendingReset) return;
+      pendingReset = false;
+      if (lastScrollPosRef.current !== 0) writePos(track, 0);
+    };
+    container.addEventListener("pointerenter", applyPendingReset);
+    container.addEventListener("focusin", applyPendingReset);
     const onReset = (e: Event) => {
       const detail = (e as CustomEvent<{ prefix?: string }>).detail;
       if (!scrollKey) return;
       if (!detail?.prefix || !scrollKey.startsWith(detail.prefix)) return;
-      // Deferred by one frame. This fires from the click handler that switches views, and every
-      // matching row used to write scrollLeft and then read scrollWidth right there — a forced
-      // layout per row, synchronously inside the click. Coalescing the writes into a single frame
-      // lets the browser lay out once, after the click has already been handled. The write below
-      // still fires the track's own scroll handler, which is what updates the arrows.
+      // Deferred by one frame. This fires during the commit that switches views (ViewProvider's
+      // layout effect), and every matching row used to write scrollLeft and then read scrollWidth
+      // right there — a forced layout per row, synchronously inside the switch. Coalescing the
+      // writes into a single frame lets the browser lay out once, after the commit. The write below
+      // still fires the track's own scroll handler, which is what updates the arrows. It is skipped
+      // for rows already at 0, since most rows are, and that write is the expensive part.
       if (resetRaf != null) return;
       resetRaf = requestAnimationFrame(() => {
         resetRaf = null;
@@ -555,7 +568,11 @@ export function Row({
           window.clearTimeout(saveTimer);
           saveTimer = null;
         }
-        writePos(track, 0);
+        if (track.closest("[data-layer-inactive]")) pendingReset = lastScrollPosRef.current !== 0;
+        else {
+          pendingReset = false;
+          if (lastScrollPosRef.current !== 0) writePos(track, 0);
+        }
         rememberRowScroll(scrollKey, 0);
         userInteractedRef.current = false;
       });
@@ -571,11 +588,13 @@ export function Row({
       track.removeEventListener("wheel", onWheel);
       track.removeEventListener("pointerdown", markInteracted);
       track.removeEventListener("keydown", markInteracted);
+      container.removeEventListener("pointerenter", applyPendingReset);
+      container.removeEventListener("focusin", applyPendingReset);
       window.removeEventListener("harbor:reset-row-scrolls", onReset);
       if (saveTimer != null) window.clearTimeout(saveTimer);
       if (wheelSettle != null) window.clearTimeout(wheelSettle);
       if (rafId.current != null) cancelAnimationFrame(rafId.current);
-      if (scrollKey && lastScrollPosRef.current > 0) {
+      if (scrollKey && lastScrollPosRef.current > 0 && !pendingReset) {
         rememberRowScroll(scrollKey, lastScrollPosRef.current);
       }
     };

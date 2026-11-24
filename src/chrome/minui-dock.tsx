@@ -6,6 +6,7 @@ import { useT } from "@/lib/i18n";
 import { useParental } from "@/lib/parental";
 import { useSettings } from "@/lib/settings";
 import { useView, type View } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 import { useAvailableNavItems, applyNavCustomization, type NavItem } from "@/chrome/nav-items";
 import { NavHiddenTray, NavHideBadge, useNavDrag } from "@/chrome/nav-edit";
 import { useNavEditMode } from "@/chrome/nav-edit-mode";
@@ -19,6 +20,7 @@ const MAG_PEAK = 1.42;
 
 export function MinUIDock() {
   const { view, setView, chromeHidden } = useView();
+  const selectView = useInstantNav();
   const { locked, unlock, hiddenTabs } = useParental();
   const { settings } = useSettings();
   const [pinFor, setPinFor] = useState<View | null>(null);
@@ -71,12 +73,12 @@ export function MinUIDock() {
   }
   buttonCentersRef.current = computeCenters(firstPassScales);
 
-  const navigate = (it: NavItem) => {
+  const navigate = (it: NavItem, e?: React.MouseEvent<HTMLElement>) => {
     if (it.parentalKey && locked && hiddenTabs[it.parentalKey]) {
       setPinFor(it.view);
       return;
     }
-    setView(it.view);
+    selectView(it.view, e, "minui");
   };
 
   const onMove = (e: React.PointerEvent<HTMLDivElement>) => {
@@ -164,7 +166,7 @@ function MinUIDockItem({
   item: NavItem;
   active: boolean;
   scale: number;
-  navigate: (it: NavItem) => void;
+  navigate: (it: NavItem, e?: React.MouseEvent<HTMLElement>) => void;
 }) {
   const t = useT();
   const label = t(item.label);
@@ -196,7 +198,7 @@ function MinUIDockItem({
         scale={scale}
         baseSize={ICON_BASE}
         hideIndicator={editing}
-        onClick={() => navigate(item)}
+        onClick={(e) => navigate(item, e)}
       >
         <span
           className="block"

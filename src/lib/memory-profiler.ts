@@ -6,6 +6,7 @@ import {
   type RenderReportRow,
 } from "./memory-dump-text";
 import { getNativeMem, getRamTier } from "./native-memory";
+import { diagnosticSnapshot } from "./perf/diagnostics";
 import {
   probeRows,
   renderCauseRows,
@@ -153,7 +154,8 @@ const FRAME_STALL_MS = 100;
 // seconds, so a scrolling episode that ended before the dump was invisible — which is exactly how
 // "it gets laggier while I scroll" kept reading as a clean 10%.
 const SECOND_HISTORY_MAX = 3600;
-let secondHistory: Array<{ at: number; frames: number; p50: number; p95: number; max: number }> = [];
+let secondHistory: Array<{ at: number; frames: number; p50: number; p95: number; max: number }> =
+  [];
 let secondDts: number[] = [];
 let secondStartAt = 0;
 let frameRaf: number | null = null;
@@ -364,30 +366,34 @@ export function getViewportInfo(): ViewportInfo {
 function buildDump(): string {
   const now = Date.now();
   const sinceReset = resetAt || (fullHistory[0]?.ts ?? now);
-  return buildDumpText({
-    now,
-    elapsedSec: (now - sinceReset) / 1000,
-    baselineHeapMB,
-    currentHeapMB: snapshotHeapMB(),
-    peakHeapMB,
-    dom: snapshotDom(),
-    networkBytes,
-    events: fullHistory.filter((s) => s.ts >= sinceReset),
-    navStack,
-    caches: reportCaches(),
-    cacheHistory: cacheSizeHistory,
-    renderReport: getRenderReport(),
-    nativeMem: getNativeMem(),
-    ramTier: getRamTier(),
-    capabilities: getInstrumentationSupport(),
-    drift: driftStats(),
-    frames: getFrameStats(),
-    viewport: getViewportInfo(),
-    renderCauses: renderCauseRows(),
-    storeNotifies: storeNotifyRows(),
-    probes: probeRows(),
-    bridges: bridgeRows(),
-  });
+  return (
+    buildDumpText({
+      now,
+      elapsedSec: (now - sinceReset) / 1000,
+      baselineHeapMB,
+      currentHeapMB: snapshotHeapMB(),
+      peakHeapMB,
+      dom: snapshotDom(),
+      networkBytes,
+      events: fullHistory.filter((s) => s.ts >= sinceReset),
+      navStack,
+      caches: reportCaches(),
+      cacheHistory: cacheSizeHistory,
+      renderReport: getRenderReport(),
+      nativeMem: getNativeMem(),
+      ramTier: getRamTier(),
+      capabilities: getInstrumentationSupport(),
+      drift: driftStats(),
+      frames: getFrameStats(),
+      viewport: getViewportInfo(),
+      renderCauses: renderCauseRows(),
+      storeNotifies: storeNotifyRows(),
+      probes: probeRows(),
+      bridges: bridgeRows(),
+    }) +
+    "\n\nAPP PERFORMANCE BREADCRUMBS (bounded, numeric only)\n" +
+    JSON.stringify(diagnosticSnapshot(), null, 2)
+  );
 }
 
 function downloadText(text: string, filename: string): void {
@@ -441,14 +447,18 @@ function periodicReport() {
   if (heapJumps.length > 0) {
     console.warn("Heap jumps (>5MB) in last window:");
     for (const { s, jump } of heapJumps) {
-      console.warn(`  +${jump.toFixed(1)}MB @ ${new Date(s.ts).toLocaleTimeString()} after ${s.kind}: ${s.label}`);
+      console.warn(
+        `  +${jump.toFixed(1)}MB @ ${new Date(s.ts).toLocaleTimeString()} after ${s.kind}: ${s.label}`,
+      );
     }
   }
   if (navStack.length > 0) {
     const lastNav = navStack[navStack.length - 1];
     const since = (Date.now() - lastNav.at) / 1000;
     const heapDeltaSinceNav = heap - lastNav.heap;
-    console.info(`Last nav: ${lastNav.label} (${since.toFixed(0)}s ago, Δ${heapDeltaSinceNav >= 0 ? "+" : ""}${heapDeltaSinceNav.toFixed(1)}MB since)`);
+    console.info(
+      `Last nav: ${lastNav.label} (${since.toFixed(0)}s ago, Δ${heapDeltaSinceNav >= 0 ? "+" : ""}${heapDeltaSinceNav.toFixed(1)}MB since)`,
+    );
   }
   console.groupEnd();
 }
@@ -504,7 +514,8 @@ function instrumentClicks() {
     (e) => {
       const target = e.target as HTMLElement | null;
       if (!target) return;
-      const label = target.getAttribute("aria-label") ||
+      const label =
+        target.getAttribute("aria-label") ||
         target.textContent?.trim().slice(0, 40) ||
         target.tagName.toLowerCase();
       pushSample("click", label);
@@ -593,7 +604,10 @@ function instrumentLongAnimationFrames() {
   } catch {}
 }
 
-const renderTimings = new Map<string, { count: number; totalMs: number; maxMs: number; lastMs: number }>();
+const renderTimings = new Map<
+  string,
+  { count: number; totalMs: number; maxMs: number; lastMs: number }
+>();
 
 export function recordRender(componentId: string, actualDurationMs: number): void {
   const entry = renderTimings.get(componentId) ?? { count: 0, totalMs: 0, maxMs: 0, lastMs: 0 };

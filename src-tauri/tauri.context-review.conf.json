@@ -6,6 +6,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "Harbor Context Review",
         "url": "index.html",
         "width": 1280,

@@ -43,6 +43,9 @@ export function MonthGrid({
           return (
             <div
               key={cell.iso}
+              data-calendar-day={cell.inMonth ? "month" : "adjacent"}
+              data-calendar-day-items={events.length}
+              data-calendar-day-shown={Math.min(events.length, cap)}
               className={`flex min-h-[136px] flex-col gap-1.5 rounded-xl border p-2 transition-colors ${
                 cell.inMonth
                   ? isToday

@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 // @ts-expect-error Node test types are intentionally outside the browser-only tsconfig.
 import test from "node:test";
 import ts from "typescript";
+import { CalendarCache } from "../src/lib/calendar-cache.ts";
+import { mapCalendarLimit } from "../src/lib/calendar-scheduler.ts";
 import { localDateTimeFromIso } from "../src/lib/calendar-time.ts";
 
 type Api = {
@@ -22,6 +24,10 @@ function load(overrides: Record<string, unknown> = {}): Api {
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
   ).outputText;
   const mocks: Record<string, unknown> = {
+    "./calendar-scheduler": { mapCalendarLimit },
+    "./calendar-cache": { CalendarCache },
+    "./calendar-cache-scope": { calendarScopeKey: () => "scope", registerCalendarCache: () => {} },
+    "@/lib/perf/diagnostics": { measureDiagnostic: () => () => {} },
     "./cinemeta": { meta: async () => null },
     "./stremio": { library: async () => [] },
     "./watchlist": { readLocalEntries: () => [] },
@@ -29,6 +35,7 @@ function load(overrides: Record<string, unknown> = {}): Api {
     "./manual-watched": { manualWatchedLibraryItems: () => [] },
     "./trakt/watchlist": { fetchWatchlist: async () => [] },
     "./providers/tvmaze": { tvmazeUpcoming: async () => null },
+    "./providers/tmdb/tmdb-client": { effectiveTmdbLanguage: () => "en-US" },
     "./providers/tmdb/tmdb-calendar": {
       tmdbFindByImdb: async () => ({ tvId: null, movieId: null }),
       tmdbMovieRelease: async () => null,
@@ -62,6 +69,22 @@ const TOUGEN_S2 = {
     "2": { episode: "2", airdate: "2026-10-09" },
   },
 };
+
+test("a failed Trakt watchlist rejects the library month even with local candidates", async () => {
+  const api = load({
+    "./local-cw": { listLocalCw: () => [{ id: "tt1", type: "movie", name: "Film" }] },
+    "./trakt/watchlist": {
+      fetchWatchlist: async (strict: boolean) => {
+        assert.equal(strict, true);
+        throw new Error("offline");
+      },
+    },
+  });
+  await assert.rejects(
+    api.fetchLibraryCalendar("key", 2026, 9, { tmdbKey: "", includeTrakt: true }),
+    /library/,
+  );
+});
 
 test("a locally started anime reaches the library calendar without a Stremio entry", async () => {
   const api = load({
@@ -128,8 +151,24 @@ test("a merged parent-season episode does not duplicate the real sequel airing",
         poster: null,
         isAnime: true,
         episodes: [
-          { season: 1, number: 14, name: "Episode 14", airDate: "2026-10-10", image: null, overview: "", voteAverage: 0 },
-          { season: 2, number: 3, name: "Episode 3", airDate: "2026-10-10", image: null, overview: "", voteAverage: 0 },
+          {
+            season: 1,
+            number: 14,
+            name: "Episode 14",
+            airDate: "2026-10-10",
+            image: null,
+            overview: "",
+            voteAverage: 0,
+          },
+          {
+            season: 2,
+            number: 3,
+            name: "Episode 3",
+            airDate: "2026-10-10",
+            image: null,
+            overview: "",
+            voteAverage: 0,
+          },
         ],
       }),
       tmdbMovieRelease: async () => null,
@@ -145,7 +184,12 @@ test("a catalog row in the same franchise as an anime row is dropped", async () 
   const api = load({
     "./local-cw": {
       listLocalCw: () => [
-        { id: "kitsu:49444", type: "series", name: "Bleach: Thousand-Year Blood War - The Calamity", t: Date.now() },
+        {
+          id: "kitsu:49444",
+          type: "series",
+          name: "Bleach: Thousand-Year Blood War - The Calamity",
+          t: Date.now(),
+        },
         { id: "tmdb:tv:30984", type: "series", name: "Bleach", t: Date.now() },
       ],
     },
@@ -161,7 +205,9 @@ test("a catalog row in the same franchise as an anime row is dropped", async () 
           ? {
               titles: { en: "Bleach: Thousand-Year Blood War - The Calamity" },
               mappings: {},
-              episodes: { "9": { episode: "9", seasonNumber: 17, episodeNumber: 49, airdate: "2026-10-19" } },
+              episodes: {
+                "9": { episode: "9", seasonNumber: 17, episodeNumber: 49, airdate: "2026-10-19" },
+              },
             }
           : null,
       aniZipByMal: async () => null,
@@ -174,7 +220,15 @@ test("a catalog row in the same franchise as an anime row is dropped", async () 
         poster: null,
         isAnime: true,
         episodes: [
-          { season: 2, number: 49, name: "THE BLADE", airDate: "2026-10-20", image: null, overview: "", voteAverage: 0 },
+          {
+            season: 2,
+            number: 49,
+            name: "THE BLADE",
+            airDate: "2026-10-20",
+            image: null,
+            overview: "",
+            voteAverage: 0,
+          },
         ],
       }),
       tmdbMovieRelease: async () => null,

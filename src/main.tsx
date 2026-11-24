@@ -20,6 +20,10 @@ import "@/index.css";
 import "flag-icons/css/flag-icons.min.css";
 import { startTaskbarProgress } from "@/lib/download/taskbar-progress";
 import { completeBetaReturnPreferences } from "@/lib/updater/beta-return";
+import { installDiagnostics } from "@/lib/perf/diagnostics";
+import { initializeDiagnosticsSessions } from "@/lib/diagnostics/session";
+
+installDiagnostics();
 
 // Loaded only when a DJ window is actually opened; not part of the core entry graph.
 const DjDeckApp = lazy(() =>
@@ -109,6 +113,12 @@ if (isDjDeck) {
   });
 }
 const isRemote = detectRemoteMode();
+
+try {
+  if (!isRemote && getCurrentWindow().label === "main") void initializeDiagnosticsSessions();
+} catch {
+  // Browser and detached-window contexts do not expose a native diagnostics service.
+}
 applyOsDataset();
 if (isRemote) {
   document.documentElement.style.overflow = "auto";

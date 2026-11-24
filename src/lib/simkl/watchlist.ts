@@ -36,7 +36,10 @@ export function mapIds(ids: RawIds | undefined): SimklIds {
 }
 
 const WATCHLIST_TTL_MS = 25000;
-const statusCache = new Map<string, { at: number; marker: string | null; val: Promise<SimklItem[]> }>();
+const statusCache = new Map<
+  string,
+  { at: number; marker: string | null; val: Promise<SimklItem[]> }
+>();
 
 export function invalidateWatchlistCache(): void {
   statusCache.clear();
@@ -54,9 +57,12 @@ async function fetchByStatus(status: string): Promise<SimklItem[]> {
   return val;
 }
 
-async function fetchByStatusRaw(status: string): Promise<SimklItem[]> {
+async function fetchByStatusRaw(status: string, strict = false): Promise<SimklItem[]> {
   const data = await simklRequest<RawAllItems>(`/sync/all-items/all/${status}?extended=full`).catch(
-    () => ({}) as RawAllItems,
+    (error) => {
+      if (strict) throw error;
+      return {} as RawAllItems;
+    },
   );
   const out: SimklItem[] = [];
   for (const e of data.movies ?? []) {
@@ -84,12 +90,12 @@ async function fetchByStatusRaw(status: string): Promise<SimklItem[]> {
   return out;
 }
 
-export async function fetchWatchlist(): Promise<SimklItem[]> {
-  return fetchByStatus("plantowatch");
+export async function fetchWatchlist(strict = false): Promise<SimklItem[]> {
+  return strict ? fetchByStatusRaw("plantowatch", true) : fetchByStatus("plantowatch");
 }
 
-export async function fetchWatchingItems(): Promise<SimklItem[]> {
-  return fetchByStatus("watching");
+export async function fetchWatchingItems(strict = false): Promise<SimklItem[]> {
+  return strict ? fetchByStatusRaw("watching", true) : fetchByStatus("watching");
 }
 
 export async function addToWatchlist(target: SimklTarget): Promise<boolean> {

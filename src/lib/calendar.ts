@@ -13,6 +13,8 @@ import { setItemWithRecovery } from "@/lib/storage-recovery";
 import { focusWindow } from "@/lib/window";
 import { tmdbImdbId } from "./providers/tmdb";
 import { automaticNotificationPermission } from "./notification-permission";
+import { cachedBrowsePage } from "./scoped-data-cache";
+import { projectCatalogPage } from "./providers/tmdb/tmdb-catalog-cache";
 
 const TMDB = "https://api.themoviedb.org/3";
 const IMG = "https://image.tmdb.org/t/p";
@@ -77,12 +79,70 @@ function isAnimeRow(row: {
   return animation && japanese;
 }
 
+async function calendarPage<T>(url: URL, page: number, strict = false): Promise<T[]> {
+  if (strict && page !== 1) {
+    const res = await fetch(url.toString());
+    if (!res.ok) throw new Error("Calendar request failed");
+    const json = (await res.json()) as { results?: T[] };
+    if (!Array.isArray(json.results)) throw new Error("Invalid calendar response");
+    return json.results;
+  }
+  if (page !== 1) {
+    try {
+      const res = await fetch(url.toString());
+      if (!res.ok) return [];
+      const json = (await res.json()) as { results?: T[] };
+      return json.results ?? [];
+    } catch {
+      return [];
+    }
+  }
+  const load = async () => {
+    const res = await fetch(url.toString());
+    if (!res.ok) {
+      if (strict) throw new Error("Calendar request failed");
+      return null;
+    }
+    const raw = await res.json();
+    const projected = projectCatalogPage(raw);
+    if (strict && !projected) throw new Error("Invalid calendar response");
+    return projected;
+  };
+  try {
+    const result = await cachedBrowsePage(
+      ["calendar", url.toString()],
+      load,
+      (value) => projectCatalogPage(value) !== null,
+    );
+    if (strict && !result) throw new Error("Calendar request failed");
+    return (result?.results as T[] | undefined) ?? [];
+  } catch (error) {
+    if (strict) throw error;
+    return [];
+  }
+}
+
+export function calendarWarmJobs(
+  apiKey: string,
+  region: string,
+  now = new Date(),
+): Array<() => Promise<unknown>> {
+  if (!apiKey) return [];
+  const { start, end } = monthRangeISO(now.getFullYear(), now.getMonth());
+  return [
+    () => fetchDiscoverMovies(apiKey, start, end, region, 1),
+    () => fetchDiscoverTv(apiKey, start, end, 1),
+    () => fetchUpcomingMovies(apiKey, region, 1),
+  ];
+}
+
 async function fetchDiscoverMovies(
   apiKey: string,
   start: string,
   end: string,
   region: string,
   page: number,
+  strict = false,
 ): Promise<DiscoverMovieRow[]> {
   const url = new URL(`${TMDB}/discover/movie`);
   url.searchParams.set("api_key", apiKey);
@@ -93,14 +153,7 @@ async function fetchDiscoverMovies(
   url.searchParams.set("include_adult", "false");
   url.searchParams.set("with_runtime.gte", "30");
   url.searchParams.set("page", String(page));
-  try {
-    const res = await fetch(url.toString());
-    if (!res.ok) return [];
-    const json = (await res.json()) as { results?: DiscoverMovieRow[] };
-    return json.results ?? [];
-  } catch {
-    return [];
-  }
+  return calendarPage<DiscoverMovieRow>(url, page, strict);
 }
 
 async function fetchDiscoverTv(
@@ -108,6 +161,7 @@ async function fetchDiscoverTv(
   start: string,
   end: string,
   page: number,
+  strict = false,
 ): Promise<DiscoverTvRow[]> {
   const url = new URL(`${TMDB}/discover/tv`);
   url.searchParams.set("api_key", apiKey);
@@ -116,33 +170,20 @@ async function fetchDiscoverTv(
   url.searchParams.set("sort_by", "popularity.desc");
   url.searchParams.set("include_adult", "false");
   url.searchParams.set("page", String(page));
-  try {
-    const res = await fetch(url.toString());
-    if (!res.ok) return [];
-    const json = (await res.json()) as { results?: DiscoverTvRow[] };
-    return json.results ?? [];
-  } catch {
-    return [];
-  }
+  return calendarPage<DiscoverTvRow>(url, page, strict);
 }
 
 async function fetchUpcomingMovies(
   apiKey: string,
   region: string,
   page: number,
+  strict = false,
 ): Promise<DiscoverMovieRow[]> {
   const url = new URL(`${TMDB}/movie/upcoming`);
   url.searchParams.set("api_key", apiKey);
   if (region) url.searchParams.set("region", region);
   url.searchParams.set("page", String(page));
-  try {
-    const res = await fetch(url.toString());
-    if (!res.ok) return [];
-    const json = (await res.json()) as { results?: DiscoverMovieRow[] };
-    return json.results ?? [];
-  } catch {
-    return [];
-  }
+  return calendarPage<DiscoverMovieRow>(url, page, strict);
 }
 
 export async function fetchCalendarRange(
@@ -150,15 +191,16 @@ export async function fetchCalendarRange(
   start: string,
   end: string,
   region: string,
+  strict = false,
 ): Promise<CalendarItem[]> {
   if (!apiKey) return [];
   const inRange = (d?: string) => !!d && d >= start && d <= end;
   const [m1, m2, mu1, t1, t2] = await Promise.all([
-    fetchDiscoverMovies(apiKey, start, end, region, 1),
-    fetchDiscoverMovies(apiKey, start, end, region, 2),
-    fetchUpcomingMovies(apiKey, region, 1),
-    fetchDiscoverTv(apiKey, start, end, 1),
-    fetchDiscoverTv(apiKey, start, end, 2),
+    fetchDiscoverMovies(apiKey, start, end, region, 1, strict),
+    fetchDiscoverMovies(apiKey, start, end, region, 2, strict),
+    fetchUpcomingMovies(apiKey, region, 1, strict),
+    fetchDiscoverTv(apiKey, start, end, 1, strict),
+    fetchDiscoverTv(apiKey, start, end, 2, strict),
   ]);
   const movieP1 = [...m1, ...m2, ...mu1.filter((m) => inRange(m.release_date))];
   const movieP2: DiscoverMovieRow[] = [];
@@ -249,15 +291,20 @@ async function fetchPersonCredits(
   apiKey: string,
   personId: number,
   kind: "movie" | "tv",
+  strict = false,
 ): Promise<PersonCreditRow[]> {
   const url = new URL(`${TMDB}/person/${personId}/${kind}_credits`);
   url.searchParams.set("api_key", apiKey);
   try {
     const res = await fetch(url.toString());
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error("Calendar credits request failed");
     const json = (await res.json()) as { cast?: PersonCreditRow[]; crew?: PersonCreditRow[] };
+    if (strict && (!Array.isArray(json.cast) || !Array.isArray(json.crew))) {
+      throw new Error("Invalid calendar credits response");
+    }
     return [...(json.cast ?? []), ...(json.crew ?? [])];
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 }
@@ -273,11 +320,12 @@ export async function fetchPersonUpcoming(
   person: TrackedPerson,
   start: string,
   end: string,
+  strict = false,
 ): Promise<CalendarItem[]> {
   if (!apiKey) return [];
   const [movies, tv] = await Promise.all([
-    fetchPersonCredits(apiKey, person.id, "movie"),
-    fetchPersonCredits(apiKey, person.id, "tv"),
+    fetchPersonCredits(apiKey, person.id, "movie", strict),
+    fetchPersonCredits(apiKey, person.id, "tv", strict),
   ]);
   void person.role;
   const items: CalendarItem[] = [];
@@ -330,8 +378,9 @@ async function discoverFiltered(opts: {
   genreIds: number[];
   providerIds: number[];
   countryCodes: string[];
+  strict?: boolean;
 }): Promise<CalendarItem[]> {
-  const { apiKey, start, end, region, kind, genreIds, providerIds, countryCodes } = opts;
+  const { apiKey, start, end, region, kind, genreIds, providerIds, countryCodes, strict } = opts;
   if (genreIds.length === 0 && providerIds.length === 0 && countryCodes.length === 0) return [];
   const url = new URL(`${TMDB}/discover/${kind}`);
   url.searchParams.set("api_key", apiKey);
@@ -356,8 +405,9 @@ async function discoverFiltered(opts: {
   }
   try {
     const res = await fetch(url.toString());
-    if (!res.ok) return [];
+    if (!res.ok) throw new Error("Calendar discovery request failed");
     const json = (await res.json()) as { results?: Array<DiscoverMovieRow | DiscoverTvRow> };
+    if (strict && !Array.isArray(json.results)) throw new Error("Invalid calendar response");
     const rows = json.results ?? [];
     return rows.map((r) => {
       if (kind === "movie") {
@@ -389,7 +439,8 @@ async function discoverFiltered(opts: {
         voteAverage: s.vote_average ?? 0,
       };
     });
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 }
@@ -408,9 +459,10 @@ export async function fetchCustomCalendar(opts: {
   filters: CustomCalendarFilters;
   start: string;
   end: string;
-  extra?: CalendarItem[];
+  extra?: CalendarItem[] | Promise<CalendarItem[]>;
+  strict?: boolean;
 }): Promise<CalendarItem[]> {
-  const { apiKey, region, filters, start, end, extra = [] } = opts;
+  const { apiKey, region, filters, start, end, extra = [], strict = false } = opts;
   const movieGenres = filters.genres.filter((g) => g.mediaType === "movie").map((g) => g.id);
   const tvGenres = filters.genres.filter((g) => g.mediaType === "tv").map((g) => g.id);
   const providerIds = filters.watchProviders.map((p) => p.id);
@@ -420,7 +472,7 @@ export async function fetchCustomCalendar(opts: {
   const wantAnime = filters.mediaTypes.anime;
 
   const tasks: Promise<CalendarItem[]>[] = filters.trackedPeople.map((p) =>
-    fetchPersonUpcoming(apiKey, p, start, end),
+    fetchPersonUpcoming(apiKey, p, start, end, strict),
   );
   if (wantMovie || wantAnime) {
     tasks.push(
@@ -433,6 +485,7 @@ export async function fetchCustomCalendar(opts: {
         genreIds: movieGenres,
         providerIds,
         countryCodes: filters.originCountries,
+        strict,
       }),
     );
   }
@@ -447,11 +500,12 @@ export async function fetchCustomCalendar(opts: {
         genreIds: tvGenres,
         providerIds,
         countryCodes: filters.originCountries,
+        strict,
       }),
     );
   }
-  const batches = await Promise.all(tasks);
-  const all = [...extra, ...batches.flat()];
+  const [batches, extraItems] = await Promise.all([Promise.all(tasks), extra]);
+  const all = [...extraItems, ...batches.flat()];
 
   const filterMatches = (i: CalendarItem): boolean => {
     if (i.isAnime) return wantAnime;
@@ -537,8 +591,11 @@ export async function ensureDesktopNotifyPermission(): Promise<boolean> {
 
 /** Read permission for automatic events without prompting the user. */
 export async function hasDesktopNotifyPermission(): Promise<boolean> {
-  return automaticNotificationPermission(isDesktopTauri(), "Notification" in window ? Notification.permission : undefined,
-    () => invoke<boolean | null>("plugin:notification|is_permission_granted"));
+  return automaticNotificationPermission(
+    isDesktopTauri(),
+    "Notification" in window ? Notification.permission : undefined,
+    () => invoke<boolean | null>("plugin:notification|is_permission_granted"),
+  );
 }
 
 function detailDeepLink(item: CalendarItem): string | undefined {

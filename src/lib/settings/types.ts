@@ -731,6 +731,8 @@ export type Settings = {
   publicmetadbScrobbleEnabled: boolean;
   weekStartsMonday: boolean;
   calendarPosterSize: CalendarPosterSize;
+  /** Loads the library Calendar in the background shortly after startup. */
+  calendarPreloadOnStartup: boolean;
   customCalendar: {
     trackedPeople: Array<{
       id: number;

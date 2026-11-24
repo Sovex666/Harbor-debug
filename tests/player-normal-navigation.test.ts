@@ -35,6 +35,12 @@ function harness() {
   const calls: unknown[] = [];
   let fullscreen = false;
   const dependencies: Record<string, unknown> = {
+    "./perf/diagnostics": {
+      recordDiagnostic() {},
+      beginDiagnosticNavigation() {},
+      commitDiagnosticNavigation() {},
+      registerDiagnosticNavigator: () => () => {},
+    },
     react: React,
     "react/jsx-runtime": jsx,
     "lucide-react": icons,

@@ -5,6 +5,7 @@ import {
   subscribeNativeMemory,
   type RamTier,
 } from "./native-memory";
+import { recordDiagnostic } from "./perf/diagnostics";
 import { pulseWebviewMemoryLow } from "./webview-memory";
 
 type Evictor = (aggressive: boolean) => void;
@@ -81,6 +82,7 @@ function tierCeilingMB(tier: RamTier): number {
 function setPressure(high: boolean): void {
   if (high === pressureHigh) return;
   pressureHigh = high;
+  recordDiagnostic("memory:pressure", { high, rssMB: getNativeRssMB() });
   for (const cb of pressureListeners) {
     try {
       cb(high);

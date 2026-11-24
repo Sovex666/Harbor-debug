@@ -9,16 +9,26 @@ export type CalendarEpisode = TraktItem & {
   episodeTitle?: string;
 };
 
-export async function fetchUpcomingEpisodes(days = 14): Promise<CalendarEpisode[]> {
+export async function fetchUpcomingEpisodes(days = 14, strict = false): Promise<CalendarEpisode[]> {
   type Raw = {
     first_aired: string;
-    episode: { season: number; number: number; title?: string; ids: { imdb?: string; tmdb?: number; tvdb?: number } };
-    show: { title: string; year: number | null; ids: { imdb?: string; tmdb?: number; tvdb?: number } };
+    episode: {
+      season: number;
+      number: number;
+      title?: string;
+      ids: { imdb?: string; tmdb?: number; tvdb?: number };
+    };
+    show: {
+      title: string;
+      year: number | null;
+      ids: { imdb?: string; tmdb?: number; tvdb?: number };
+    };
   };
   const today = new Date().toISOString().slice(0, 10);
-  const rows = await traktRequest<Raw[]>(
-    `/calendars/my/shows/${today}/${days}`,
-  ).catch(() => [] as Raw[]);
+  const rows = await traktRequest<Raw[]>(`/calendars/my/shows/${today}/${days}`).catch((error) => {
+    if (strict) throw error;
+    return [] as Raw[];
+  });
   return rows.map((r) => ({
     type: "show" as const,
     title: r.show.title,
@@ -31,15 +41,16 @@ export async function fetchUpcomingEpisodes(days = 14): Promise<CalendarEpisode[
   }));
 }
 
-export async function fetchUpcomingMovies(days = 30): Promise<TraktItem[]> {
+export async function fetchUpcomingMovies(days = 30, strict = false): Promise<TraktItem[]> {
   type Raw = {
     released: string;
     movie: { title: string; year: number | null; ids: { imdb?: string; tmdb?: number } };
   };
   const today = new Date().toISOString().slice(0, 10);
-  const rows = await traktRequest<Raw[]>(
-    `/calendars/my/movies/${today}/${days}`,
-  ).catch(() => [] as Raw[]);
+  const rows = await traktRequest<Raw[]>(`/calendars/my/movies/${today}/${days}`).catch((error) => {
+    if (strict) throw error;
+    return [] as Raw[];
+  });
   return rows.map((r) => ({
     type: "movie" as const,
     title: r.movie.title,
@@ -67,7 +78,7 @@ export type AnticipatedMovie = {
   overview: string;
 };
 
-export async function fetchAnticipatedShows(): Promise<AnticipatedShow[]> {
+export async function fetchAnticipatedShows(strict = false): Promise<AnticipatedShow[]> {
   type Raw = {
     list_count?: number;
     show: {
@@ -78,10 +89,12 @@ export async function fetchAnticipatedShows(): Promise<AnticipatedShow[]> {
       ids: { imdb?: string; tmdb?: number; tvdb?: number };
     };
   };
-  const rows = await traktRequest<Raw[]>(
-    `/shows/anticipated?extended=full&limit=100`,
-    { authed: false },
-  ).catch(() => [] as Raw[]);
+  const rows = await traktRequest<Raw[]>(`/shows/anticipated?extended=full&limit=100`, {
+    authed: false,
+  }).catch((error) => {
+    if (strict) throw error;
+    return [] as Raw[];
+  });
   return rows
     .filter((r) => r.show.first_aired)
     .map((r) => ({
@@ -94,7 +107,7 @@ export async function fetchAnticipatedShows(): Promise<AnticipatedShow[]> {
     }));
 }
 
-export async function fetchAnticipatedMovies(): Promise<AnticipatedMovie[]> {
+export async function fetchAnticipatedMovies(strict = false): Promise<AnticipatedMovie[]> {
   type Raw = {
     list_count?: number;
     movie: {
@@ -105,10 +118,12 @@ export async function fetchAnticipatedMovies(): Promise<AnticipatedMovie[]> {
       ids: { imdb?: string; tmdb?: number };
     };
   };
-  const rows = await traktRequest<Raw[]>(
-    `/movies/anticipated?extended=full&limit=100`,
-    { authed: false },
-  ).catch(() => [] as Raw[]);
+  const rows = await traktRequest<Raw[]>(`/movies/anticipated?extended=full&limit=100`, {
+    authed: false,
+  }).catch((error) => {
+    if (strict) throw error;
+    return [] as Raw[];
+  });
   return rows
     .filter((r) => r.movie.released)
     .map((r) => ({

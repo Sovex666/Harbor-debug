@@ -22,18 +22,41 @@ const CULL_STYLE: CSSProperties = {
   marginBottom: `-${CULL_PAD_Y}px`,
 };
 
-type Probe = () => boolean;
+type Probe = { el: Element; check: (rect: DOMRectReadOnly) => boolean };
 const probes = new Set<Probe>();
 let probeTimer = 0;
+let sweep: IntersectionObserver | null = null;
 
+function stopProbeTimer(): void {
+  if (probes.size > 0 || !probeTimer) return;
+  window.clearInterval(probeTimer);
+  probeTimer = 0;
+  sweep?.disconnect();
+  sweep = null;
+}
+
+// Each sweep takes the rects from a one-shot IntersectionObserver, which computes them during
+// rendering. Reading them directly from the timer forced a synchronous layout of whatever had just
+// mounted, a 300-560 ms frame right after opening Discover, Catalogs or Anime.
 function runProbes(): void {
+  if (probes.size === 0) return;
+  // A sweep that has not reported by the next tick (no rendering, detached targets) is replaced.
+  sweep?.disconnect();
   // Probe callbacks can change subscriptions; process only this sweep's snapshot.
   // oxlint-disable-next-line unicorn/no-useless-spread
-  for (const p of [...probes]) if (p()) probes.delete(p);
-  if (probes.size === 0) {
-    window.clearInterval(probeTimer);
-    probeTimer = 0;
-  }
+  const snapshot = [...probes];
+  const io = new IntersectionObserver((entries) => {
+    io.disconnect();
+    if (sweep === io) sweep = null;
+    const rects = new Map(entries.map((e) => [e.target, e.boundingClientRect]));
+    for (const p of snapshot) {
+      const rect = rects.get(p.el);
+      if (rect && probes.has(p) && p.check(rect)) probes.delete(p);
+    }
+    stopProbeTimer();
+  });
+  sweep = io;
+  for (const p of snapshot) io.observe(p.el);
 }
 
 function addProbe(p: Probe): () => void {
@@ -41,10 +64,7 @@ function addProbe(p: Probe): () => void {
   if (!probeTimer) probeTimer = window.setInterval(runProbes, 1300);
   return () => {
     probes.delete(p);
-    if (probes.size === 0 && probeTimer) {
-      window.clearInterval(probeTimer);
-      probeTimer = 0;
-    }
+    stopProbeTimer();
   };
 }
 
@@ -91,16 +111,20 @@ export function LazyMount({
       if (e.isIntersecting) reveal();
     });
     let tries = 0;
-    const stopProbe = addProbe(() => {
-      if (el.offsetParent === null) return false;
-      if (typeof el.checkVisibility === "function" && !el.checkVisibility()) return false;
-      const vh = window.innerHeight || 800;
-      const r = el.getBoundingClientRect();
-      if (r.top > vh * 3 || r.bottom < -vh * 3) return false;
-      if (++tries > 60) return true;
-      if (inViewport(r)) reveal();
-      else startTransition(() => setShown(true));
-      return true;
+    const stopProbe = addProbe({
+      el,
+      check: (r) => {
+        // An element under display:none has an empty rect; checkVisibility (style only, no
+        // layout) also covers parked content-visibility:hidden layers.
+        if (r.width === 0 && r.height === 0) return false;
+        if (typeof el.checkVisibility === "function" && !el.checkVisibility()) return false;
+        const vh = window.innerHeight || 800;
+        if (r.top > vh * 3 || r.bottom < -vh * 3) return false;
+        if (++tries > 60) return true;
+        if (inViewport(r)) reveal();
+        else startTransition(() => setShown(true));
+        return true;
+      },
     });
     return () => {
       stopIo();

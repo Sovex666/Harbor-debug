@@ -23,6 +23,7 @@ import { DiagnosticsCard } from "./bug-report/diagnostics-card";
 import { FileDrop } from "./bug-report/file-drop";
 import { SeverityPicker } from "./bug-report/severity-picker";
 import { SuccessCard } from "./bug-report/success-card";
+import { acknowledgeDiagnosticExport, diagnosticSnapshot } from "@/lib/perf/diagnostics";
 
 const QUAL =
   "inline-flex h-[22px] shrink-0 items-center rounded-[6px] px-2 text-[13px] font-bold uppercase leading-[17px] tracking-[0.72px]";
@@ -59,20 +60,32 @@ export function BugReportPanel() {
     const localAddons = loadInstalled();
     const addonCount = auth.authKey
       ? userAddons(auth.authKey)
-          .then((addons) => new Set([...localAddons, ...addons].map((addon) => addon.transportUrl)).size)
+          .then(
+            (addons) =>
+              new Set([...localAddons, ...addons].map((addon) => addon.transportUrl)).size,
+          )
           .catch(() => null)
       : Promise.resolve(localAddons.length);
-    void Promise.all([collectDiagnostics({
-      playerEngine: settings.playerEngine,
-      region: settings.region,
-      hasTmdb: !!settings.tmdbKey,
-      hasRpdb: !!settings.rpdbKey,
-      hasTrakt: !!settings.traktAccessToken,
-      hasStremio: !!auth.authKey,
-      debridCount: [settings.rdKey, settings.tbKey, settings.adKey, settings.pmKey, settings.dlKey].filter(Boolean).length,
-      addonCount: null,
-      iptvCount: settings.iptvPlaylists.length,
-    }), addonCount]).then(([d, count]) => {
+    void Promise.all([
+      collectDiagnostics({
+        playerEngine: settings.playerEngine,
+        region: settings.region,
+        hasTmdb: !!settings.tmdbKey,
+        hasRpdb: !!settings.rpdbKey,
+        hasTrakt: !!settings.traktAccessToken,
+        hasStremio: !!auth.authKey,
+        debridCount: [
+          settings.rdKey,
+          settings.tbKey,
+          settings.adKey,
+          settings.pmKey,
+          settings.dlKey,
+        ].filter(Boolean).length,
+        addonCount: null,
+        iptvCount: settings.iptvPlaylists.length,
+      }),
+      addonCount,
+    ]).then(([d, count]) => {
       if (!cancelled) setDiag({ ...d, flags: { ...d.flags, addonCount: count } });
     });
     return () => {
@@ -170,7 +183,9 @@ export function BugReportPanel() {
             wide
             label={
               <span className="inline-flex min-w-0 flex-wrap items-center gap-2">
-                <label htmlFor="bug-report-summary" className="min-w-0">{t("Summary")}</label>
+                <label htmlFor="bug-report-summary" className="min-w-0">
+                  {t("Summary")}
+                </label>
                 <span className={`${QUAL} bg-accent-soft text-accent`}>{t("Required")}</span>
               </span>
             }
@@ -207,7 +222,9 @@ export function BugReportPanel() {
               value={steps}
               onChange={(e) => setSteps(e.target.value)}
               rows={4}
-              placeholder={t("1. Open Movies\n2. Select a title\n3. Press Play\n4. Describe what happens")}
+              placeholder={t(
+                "1. Open Movies\n2. Select a title\n3. Press Play\n4. Describe what happens",
+              )}
               className={AREA}
             />
           </SettingRow>
@@ -248,7 +265,9 @@ export function BugReportPanel() {
 
       <Section
         title={t("Attachments")}
-        subtitle={t("Add screenshots, a short recording, or a player log to help explain the problem.")}
+        subtitle={t(
+          "Add screenshots, a short recording, or a player log to help explain the problem.",
+        )}
       >
         <FileDrop files={files} onChange={setFiles} />
       </Section>
@@ -262,7 +281,9 @@ export function BugReportPanel() {
 
       <Section
         title={t("Contact & credit")}
-        subtitle={t("Optional. Leave your contact details if we may follow up, and choose whether you want public credit.")}
+        subtitle={t(
+          "Optional. Leave your contact details if we may follow up, and choose whether you want public credit.",
+        )}
       >
         <div className="max-w-[720px]">
           <CreditField
@@ -295,7 +316,9 @@ export function BugReportPanel() {
           <ToggleRow
             leading={<Award size={18} strokeWidth={1.9} />}
             label={t("Credit me in the release notes if this report leads to a fix.")}
-            sub={t("Turn off to keep your name out of the release notes. Contact details can still be used to follow up.")}
+            sub={t(
+              "Turn off to keep your name out of the release notes. Contact details can still be used to follow up.",
+            )}
             value={consentCredit}
             onChange={setConsentCredit}
           />
@@ -309,7 +332,10 @@ export function BugReportPanel() {
       <ContributorCard />
 
       {error && (
-        <div role="alert" className="mt-7 flex items-start gap-2.5 rounded-[10px] bg-elevated px-4 py-3">
+        <div
+          role="alert"
+          className="mt-7 flex items-start gap-2.5 rounded-[10px] bg-elevated px-4 py-3"
+        >
           <AlertTriangle size={18} strokeWidth={2.2} className="mt-[3px] shrink-0 text-danger" />
           <p className="max-w-[66ch] text-[15.5px] leading-[22px] text-danger">
             {t("Could not send: {error}", { error })}
@@ -329,9 +355,15 @@ function ExportLogButton() {
     setState("exporting");
     setDetail(null);
     try {
-      await invoke<string>("mpv_export_log");
+      const diagnostics = diagnosticSnapshot();
+      const throughSequence = diagnostics.events.at(-1)?.sequence ?? 0;
+      const savedPath = await invoke<string>("mpv_export_log", {
+        runtimeText: JSON.stringify(diagnostics, null, 2),
+      });
+      acknowledgeDiagnosticExport(throughSequence);
       setState("done");
-      setDetail(t("Saved to Downloads as harbor-mpv-log.txt. Attach it above."));
+      const filename = savedPath.split(/[\\/]/).at(-1) ?? "harbor-mpv-log.txt";
+      setDetail(t("Saved to Downloads as {filename}. Attach it above.", { filename }));
     } catch (e) {
       setState("error");
       setDetail(e instanceof Error ? e.message : String(e));
@@ -347,9 +379,13 @@ function ExportLogButton() {
       desc={
         done
           ? detail
-          : t("Writes the last playback session to your Downloads folder so you can attach it above.")
+          : t(
+              "Exports detailed logs across videos since the last successful export to your Downloads folder.",
+            )
       }
-      warn={state === "error" && detail ? t("Export failed: {error}", { error: detail }) : undefined}
+      warn={
+        state === "error" && detail ? t("Export failed: {error}", { error: detail }) : undefined
+      }
     >
       <SButton onClick={() => void run()} disabled={state === "exporting"}>
         {state === "exporting"

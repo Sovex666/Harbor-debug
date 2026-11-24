@@ -1,0 +1,1 @@
+Root integration note: http_fetch.rs now defines harbor_image_fetch and harbor_image_cancel, registered in lib.rs adjacent to harbor_fetch. Please preserve those registrations. Scheduler uses cancellable native GET/base64 jobs, max8 native images; synchronous transforms already spawned may finish after cancellation, but results are discarded.

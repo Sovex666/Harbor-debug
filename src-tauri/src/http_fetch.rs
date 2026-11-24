@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 use std::future::Future;
 use std::net::{IpAddr, SocketAddr};
-use std::sync::OnceLock;
-use std::time::Duration;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use crate::http_redirect::same_origin;
 use base64::Engine;
@@ -140,11 +140,7 @@ pub struct ThumbCacheSize {
 }
 
 #[tauri::command]
-pub async fn cached_thumb_path(
-    app: tauri::AppHandle,
-    url: String,
-    width: u32,
-) -> Option<String> {
+pub async fn cached_thumb_path(app: tauri::AppHandle, url: String, width: u32) -> Option<String> {
     let app = app.clone();
     tokio::task::spawn_blocking(move || crate::thumb_cache::cached_path(&app, &url, width))
         .await
@@ -470,6 +466,95 @@ pub async fn harbor_fetch(
     run_with_deadline(timeout, harbor_fetch_inner(app, args, image_generation)).await
 }
 
+type ImageRequests = HashMap<String, (Instant, Option<tokio::sync::oneshot::Sender<()>>)>;
+fn image_requests() -> &'static Mutex<ImageRequests> {
+    static REQUESTS: OnceLock<Mutex<ImageRequests>> = OnceLock::new();
+    REQUESTS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn valid_image_request(id: &str) -> bool {
+    id.len() == 36
+        && id
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+}
+
+struct ImageRequestGuard(String);
+impl Drop for ImageRequestGuard {
+    fn drop(&mut self) {
+        if let Ok(mut requests) = image_requests().lock() {
+            requests.remove(&self.0);
+        }
+    }
+}
+
+#[tauri::command]
+pub fn harbor_image_cancel(window: tauri::WebviewWindow, request_id: String) -> Result<(), String> {
+    if window.label() != "main" || !valid_image_request(&request_id) {
+        return Err("invalid image request".into());
+    }
+    let mut requests = image_requests()
+        .lock()
+        .map_err(|_| "image queue unavailable")?;
+    requests.retain(|_, (at, sender)| sender.is_some() || at.elapsed() < Duration::from_secs(30));
+    if let Some((_, Some(sender))) = requests.remove(&request_id) {
+        let _ = sender.send(());
+    } else if requests.len() < 256 {
+        // Cancellation may arrive before the start command is dispatched.
+        requests.insert(request_id, (Instant::now(), None));
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn harbor_image_fetch(
+    app: tauri::AppHandle,
+    window: tauri::WebviewWindow,
+    request_id: String,
+    args: HarborFetchArgs,
+) -> Result<HarborFetchResponse, String> {
+    if window.label() != "main"
+        || !valid_image_request(&request_id)
+        || args.method.as_deref().is_some_and(|method| method != "GET")
+        || args.response_type.as_deref() != Some("base64")
+    {
+        return Err("invalid image request".into());
+    }
+    let (sender, cancelled) = tokio::sync::oneshot::channel();
+    {
+        let mut requests = image_requests()
+            .lock()
+            .map_err(|_| "image queue unavailable")?;
+        requests
+            .retain(|_, (at, sender)| sender.is_some() || at.elapsed() < Duration::from_secs(30));
+        if let Some((_, previous)) = requests.get(&request_id) {
+            if previous.is_none() {
+                requests.remove(&request_id);
+                return Err("image request cancelled".into());
+            }
+            return Err("duplicate image request".into());
+        }
+        if requests.len() >= 256 {
+            return Err("image queue full".into());
+        }
+        requests.insert(request_id.clone(), (Instant::now(), Some(sender)));
+    }
+    let _guard = ImageRequestGuard(request_id);
+    static IMAGES: OnceLock<Semaphore> = OnceLock::new();
+    let work = async {
+        let _permit = IMAGES
+            .get_or_init(|| Semaphore::new(8))
+            .acquire()
+            .await
+            .map_err(|_| "image queue closed")?;
+        harbor_fetch(app, args).await
+    };
+    tokio::select! {
+        result = run_with_deadline(Duration::from_secs(35), work) => result,
+        _ = cancelled => Err("image request cancelled".into()),
+    }
+}
+
 async fn harbor_fetch_inner(
     app: tauri::AppHandle,
     args: HarborFetchArgs,
@@ -753,9 +838,8 @@ async fn harbor_fetch_inner(
                 .cloned()
                 .or(hit.modified);
             let content_type = hit.content_type.clone();
-            let freshness = hit.revalidated_lifetime(
-                response_headers.get("cache-control").map(String::as_str),
-            );
+            let freshness =
+                hit.revalidated_lifetime(response_headers.get("cache-control").map(String::as_str));
             if let Some(lifetime) = freshness {
                 let app = app.clone();
                 let url = args.url.clone();
@@ -777,7 +861,8 @@ async fn harbor_fetch_inner(
                 let width = args.thumb_width_px.unwrap_or(0);
                 let _ = tokio::task::spawn_blocking(move || {
                     crate::thumb_cache::remove_thumb(&app, &url, width, image_generation)
-                }).await;
+                })
+                .await;
             }
             return Ok(HarborFetchResponse {
                 status: 200,
@@ -842,7 +927,11 @@ async fn harbor_fetch_inner(
                     if (bytes.len() as u64).saturating_add(chunk.len() as u64) > max_bytes {
                         if let Some(hit) = cached_image.as_ref() {
                             if !hit.fresh {
-                                return stale_image_response(&args.url, args.max_response_bytes, hit);
+                                return stale_image_response(
+                                    &args.url,
+                                    args.max_response_bytes,
+                                    hit,
+                                );
                             }
                         }
                         return Err("response size limit exceeded".to_string());
@@ -1064,11 +1153,16 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.body, "YWJj");
         assert_eq!(
-            response.headers.get("x-harbor-image-cache").map(String::as_str),
+            response
+                .headers
+                .get("x-harbor-image-cache")
+                .map(String::as_str),
             Some("stale")
         );
-        assert!(cached_image_response("https://example.com/a.png", Some(2), &image, "stale", 300)
-            .is_err());
+        assert!(
+            cached_image_response("https://example.com/a.png", Some(2), &image, "stale", 300)
+                .is_err()
+        );
     }
 
     #[test]

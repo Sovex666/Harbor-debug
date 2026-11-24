@@ -14,6 +14,7 @@ import { useT } from "@/lib/i18n";
 import { useParental } from "@/lib/parental";
 import { useSettings } from "@/lib/settings";
 import { useView, type View } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 
 const PRIMARY_IDS = new Set([
   "home",
@@ -30,6 +31,7 @@ const PRIMARY_IDS = new Set([
 export function DraculaSidebar() {
   const editing = useNavEditMode();
   const { view, setView, chromeHidden } = useView();
+  const selectView = useInstantNav();
   const { locked, unlock, hiddenTabs } = useParental();
   const { settings } = useSettings();
   const t = useT();
@@ -56,12 +58,12 @@ export function DraculaSidebar() {
     return true;
   };
 
-  const go = (item: NavItem) => {
+  const go = (item: NavItem, e?: React.MouseEvent<HTMLElement>) => {
     if (item.pinGated && locked) {
       setPinFor(item.view);
       return;
     }
-    setView(item.view);
+    selectView(item.view, e, "dracula");
   };
 
   return (
@@ -105,7 +107,7 @@ export function DraculaSidebar() {
           >
             <button
               type="button"
-              onClick={() => setView("home")}
+              onClick={(e) => selectView("home", e)}
               aria-label={t("chrome.harborHome")}
               className="flex items-center gap-2 text-ink"
             >
@@ -138,7 +140,7 @@ export function DraculaSidebar() {
                 item={item}
                 active={view === item.view}
                 collapsed={collapsed}
-                onClick={() => go(item)}
+                onClick={(e) => go(item, e)}
               />
             ))}
 
@@ -149,7 +151,7 @@ export function DraculaSidebar() {
                 active={view === item.view}
                 gated={!!item.pinGated && locked}
                 collapsed={collapsed}
-                onClick={() => go(item)}
+                onClick={(e) => go(item, e)}
               />
             ))}
           </nav>
@@ -222,7 +224,7 @@ function NavPill({
   active: boolean;
   gated?: boolean;
   collapsed?: boolean;
-  onClick: () => void;
+  onClick: (e?: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
   const t = useT();
   const label = t(item.label);

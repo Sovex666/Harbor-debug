@@ -72,6 +72,7 @@ function stripHtml(s: string): string {
 export async function fetchAniListAiringCalendar(
   year: number,
   month: number,
+  strict = false,
 ): Promise<CalendarItem[]> {
   const start = Math.floor(new Date(year, month, 1).getTime() / 1000);
   const end = Math.floor(new Date(year, month + 1, 1).getTime() / 1000);
@@ -80,6 +81,9 @@ export async function fetchAniListAiringCalendar(
   let next = 1;
   let pastLast = false;
   let inflight = 0;
+  const failedPages = new Set<number>();
+  let truncated = false;
+  let terminalPage: number | undefined;
   let resolveDone: () => void = () => {};
   const done = new Promise<void>((r) => {
     resolveDone = r;
@@ -91,12 +95,23 @@ export async function fetchAniListAiringCalendar(
       inflight++;
       anilistRequest<AiringResponse>(AIRING_QUERY, { start, end, page }, undefined, true)
         .then((data) => {
+          if (
+            strict &&
+            (!Array.isArray(data?.Page?.airingSchedules) ||
+              typeof data?.Page?.pageInfo?.hasNextPage !== "boolean")
+          )
+            throw new Error("Invalid airing response");
           const nodes = data?.Page?.airingSchedules ?? [];
           pages.set(page, nodes);
           const hasNext = data?.Page?.pageInfo?.hasNextPage ?? nodes.length >= 50;
-          if (!hasNext) pastLast = true;
+          if (!hasNext) {
+            pastLast = true;
+            terminalPage = Math.min(terminalPage ?? page, page);
+          }
+          if (page === MAX_PAGES && hasNext) truncated = true;
         })
         .catch(() => {
+          failedPages.add(page);
           pastLast = true;
         })
         .finally(() => {
@@ -108,10 +123,16 @@ export async function fetchAniListAiringCalendar(
   };
   pump();
   await done;
+  const requiredFailure = [...failedPages].some(
+    (page) => terminalPage == null || page <= terminalPage,
+  );
+  if (strict && (requiredFailure || (truncated && terminalPage == null)))
+    throw new Error("Incomplete airing calendar");
 
   const out: CalendarItem[] = [];
   const seen = new Set<string>();
   for (let page = 1; page <= MAX_PAGES; page++) {
+    if (terminalPage != null && page > terminalPage) break;
     const nodes = pages.get(page);
     if (!nodes) break;
     for (const node of nodes) {

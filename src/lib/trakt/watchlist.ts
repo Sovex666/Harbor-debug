@@ -5,14 +5,25 @@ type RawWatchlistRow = {
   rank?: number;
   listed_at: string;
   type: "movie" | "show";
-  movie?: { title: string; year: number | null; ids: { imdb?: string; tmdb?: number; trakt?: number } };
-  show?: { title: string; year: number | null; ids: { imdb?: string; tmdb?: number; tvdb?: number; trakt?: number } };
+  movie?: {
+    title: string;
+    year: number | null;
+    ids: { imdb?: string; tmdb?: number; trakt?: number };
+  };
+  show?: {
+    title: string;
+    year: number | null;
+    ids: { imdb?: string; tmdb?: number; tvdb?: number; trakt?: number };
+  };
 };
 
-export async function fetchWatchlist(): Promise<TraktItem[]> {
+export async function fetchWatchlist(strict = false): Promise<TraktItem[]> {
   const rows = await traktRequest<RawWatchlistRow[]>(
     "/sync/watchlist?sort_by=added&sort_how=desc",
-  ).catch(() => [] as RawWatchlistRow[]);
+  ).catch((error) => {
+    if (strict) throw error;
+    return [] as RawWatchlistRow[];
+  });
   const out: TraktItem[] = [];
   for (const r of rows) {
     if (r.type === "movie" && r.movie) {

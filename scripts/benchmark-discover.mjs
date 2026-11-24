@@ -39,6 +39,7 @@ export function catalogModule() {
 
 export function clientFixture({ baseline = false, latency = 0, fetch } = {}) {
   let requests = 0;
+  const browse = catalogModule().createCatalogCache();
   const client = loadModule(readSource("src/lib/providers/tmdb/tmdb-client.ts", baseline), {
     "@/lib/safe-fetch": {
       safeFetch: async (...args) => {
@@ -53,6 +54,17 @@ export function clientFixture({ baseline = false, latency = 0, fetch } = {}) {
       cachedMedia: async (_namespace, _scope, loader) => loader(),
       metadataCacheTtl: () => 0,
       MEDIA_TTL: { recent: 0 },
+      onMediaCacheClear() {},
+    },
+    "@/lib/scoped-data-cache": {
+      cachedBrowsePage: async (scope, loader, valid) => {
+        const key = JSON.stringify(scope);
+        const cached = browse.get(key);
+        if (cached !== undefined) return cached;
+        const value = await loader();
+        if (value !== null && valid(value)) browse.set(key, value);
+        return value;
+      },
     },
     "./tmdb-catalog-cache": catalogModule(),
   });

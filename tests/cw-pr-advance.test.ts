@@ -98,6 +98,10 @@ function harness() {
   const modules = new Map<string, any>();
   let params: any[] = [[], "", true, []];
   const mocks: Record<string, any> = {
+    "./library-read-cache": {
+      beginLibraryProjectionMutation: () => () => {},
+      invalidateLibraryProjections: async () => {},
+    },
     react: {
       useState: (initial: any) => {
         const slot = stateSlot++;

@@ -1,4 +1,14 @@
 import { startNuvioMutationRetry } from "@/lib/nuvio/nuvio-sync";
+import { createPrefetchCoordinator, scheduleBrowserIdle } from "@/lib/prefetch/coordinator";
+import { browseWarmJobs } from "@/lib/prefetch/browse-data";
+import { releaseBrowseCacheMemory } from "@/lib/media-cache";
+import { releaseTmdbCatalogMemory } from "@/lib/providers/tmdb/tmdb-client";
+import {
+  clearSpeculativeArtwork,
+  endParkedArtworkWarm,
+  releaseUnusedArtworkMemory,
+  warmParkedArtwork,
+} from "@/lib/remote-image-proxy";
 import { GAMES_IN_NAV } from "@/chrome/nav-items";
 import { GameAccessProvider } from "@/views/games/game-access-context";
 import { GameLibraryDock } from "@/views/games/game-library-dock";
@@ -12,6 +22,7 @@ import { SportsEventSkeleton } from "@/views/sports/sports-skeletons";
 import { SportsReminderLoop } from "@/components/sports-reminder-loop";
 import {
   memo,
+  startTransition,
   Suspense,
   useCallback,
   useEffect,
@@ -37,6 +48,7 @@ import { NordSidebar } from "@/chrome/nord-sidebar";
 import { ForestSidebar } from "@/chrome/forest-sidebar";
 import { RoyalTopbar } from "@/chrome/royal-topbar";
 import { SideRail } from "@/chrome/siderail";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 import { StremioRail } from "@/chrome/stremio-rail";
 import { TopDock } from "@/chrome/topdock";
 import { CinematicOverlay } from "@/chrome/cinematic-overlay";
@@ -177,10 +189,10 @@ import { SpooktoberHome } from "@/views/spooktober/spooktober-home";
 const MemoSpooktoberHome = memo(SpooktoberHome);
 import { useInstallFeatures, useInstallFeaturesReady } from "@/lib/features/install";
 import { ParentalProvider } from "@/lib/parental";
-import { TraktProvider } from "@/lib/trakt/provider";
+import { TraktProvider, useTrakt } from "@/lib/trakt/provider";
 import { AnilistProvider } from "@/lib/anilist/provider";
 import { MalProvider } from "@/lib/mal/provider";
-import { SimklProvider } from "@/lib/simkl/provider";
+import { SimklProvider, useSimkl } from "@/lib/simkl/provider";
 import { PublicMetaDbProvider } from "@/lib/publicmetadb/provider";
 import { LetterboxdProvider } from "@/lib/stremboxd/provider";
 import {
@@ -331,11 +343,76 @@ function useViewPreloader(tmdbKey: string) {
       cancelIdleCallback?: (handle: number) => void;
     };
     let handle = 0;
+    let intentTimer = 0;
+    const intentLoaders: Record<string, () => Promise<unknown>> = {
+      calendar: importCalendar,
+      discover: importDiscover,
+      catalogs: importCatalogs,
+      plugins: importPlugins,
+      addons: importAddons,
+      anime: importAnime,
+      movies: importMovies,
+      shows: importShows,
+      library: importLibrary,
+      settings: importSettings,
+      live: importLive,
+      sports: importSports,
+      vod: importVod,
+      downloads: importDownloads,
+      kids: importKids,
+      collections: importCommunityCollections,
+      "collections-hub": importCommunityCollections,
+      music: importMusic,
+      games: importGames,
+    };
+    const warmed = new Set<string>();
+    // A deliberate hover or keyboard focus warms the destination ahead of activation.
+    // The small dwell avoids evaluating every module as the pointer crosses the sidebar.
+    const onIntent = (event: Event) => {
+      const target =
+        event.target instanceof Element
+          ? event.target.closest<HTMLElement>("[data-harbor-nav]")
+          : null;
+      const view = target?.dataset.harborNav;
+      if (!view || !intentLoaders[view] || warmed.has(view)) return;
+      if (
+        event instanceof MouseEvent &&
+        event.relatedTarget instanceof Node &&
+        target?.contains(event.relatedTarget)
+      )
+        return;
+      window.clearTimeout(intentTimer);
+      intentTimer = window.setTimeout(() => {
+        warmed.add(view);
+        void intentLoaders[view]().catch(() => {
+          warmed.delete(view);
+        });
+      }, 100);
+    };
+    const cancelIntent = (event: Event) => {
+      const target =
+        event.target instanceof Element ? event.target.closest("[data-harbor-nav]") : null;
+      if (
+        target &&
+        !(
+          event instanceof MouseEvent &&
+          event.relatedTarget instanceof Node &&
+          target.contains(event.relatedTarget)
+        )
+      ) {
+        window.clearTimeout(intentTimer);
+      }
+    };
+    document.addEventListener("pointerover", onIntent, { passive: true });
+    document.addEventListener("focusin", onIntent);
+    document.addEventListener("pointerout", cancelIntent, { passive: true });
+    document.addEventListener("focusout", cancelIntent);
     const idle = typeof win.requestIdleCallback === "function";
     const schedule = (cb: () => void) => {
       handle = idle ? win.requestIdleCallback!(cb, { timeout: 2500 }) : window.setTimeout(cb, 1200);
     };
     const preloaders: Array<() => Promise<unknown>> = [
+      importCalendar,
       importDetail,
       importPlayPicker,
       importPlayer,
@@ -345,7 +422,6 @@ function useViewPreloader(tmdbKey: string) {
       importPerson,
       importPeople,
       importFilter,
-      importCalendar,
       importMovies,
       importShows,
       importLive,
@@ -384,6 +460,11 @@ function useViewPreloader(tmdbKey: string) {
     schedule(warmNext);
     return () => {
       cancelled = true;
+      window.clearTimeout(intentTimer);
+      document.removeEventListener("pointerover", onIntent);
+      document.removeEventListener("focusin", onIntent);
+      document.removeEventListener("pointerout", cancelIntent);
+      document.removeEventListener("focusout", cancelIntent);
       if (idle) win.cancelIdleCallback?.(handle);
       else window.clearTimeout(handle);
     };
@@ -397,6 +478,11 @@ const KEEP_ALIVE_MS = 1500;
 // with every frame and GC pass paying for all of them. Long enough that an immediate back feels
 // instant, short enough that hopping tabs stops accumulating.
 const IDLE_EVICT_MS = 10 * 1000;
+// Home, Discover and Settings are returned to most, and a rebuild made their images visibly reload
+// (a rebuilt Settings froze ~1.1s), so they stay resident longer.
+const RESIDENT_EVICT_MS = 3 * 60 * 1000;
+// Entering a player keeps them resident for one more minute from the moment it opens.
+const PLAYER_EVICT_MS = 60 * 1000;
 const PRESSURE_EVICT_MS = 1500;
 const UI_SCALE_MIN = 0.8;
 const UI_SCALE_MAX = 1.6;
@@ -449,19 +535,32 @@ function AfterFirstPaint({ children, delayMs = 0 }: { children: ReactNode; delay
   return ready ? <>{children}</> : null;
 }
 
-function useIdleEvict(active: boolean, pin = false): boolean {
+function useIdleEvict(active: boolean, pin = false, idleMs = IDLE_EVICT_MS, warmToken = 0): boolean {
   const [alive, setAlive] = useState(active);
   const [pressure, setPressure] = useState(false);
+  const handledWarmRef = useRef(0);
   useEffect(() => subscribeMemoryPressure(setPressure), []);
+  // A warm mounts a parked view without showing it. A warm of a view already mounted only restarts
+  // its timer, through the timer effect's `warmToken` dependency below.
+  useEffect(() => {
+    if (warmToken === handledWarmRef.current) return;
+    handledWarmRef.current = warmToken;
+    if (active || pin || pressure) return;
+    // Runs in an effect, outside the caller's transition, so the parked mount needs its own to stay interruptible.
+    startTransition(() => setAlive(true));
+  }, [warmToken, active, pin, pressure]);
   useEffect(() => {
     if (active || pin) {
       setAlive(true);
       return;
     }
     if (!alive) return;
-    const t = setTimeout(() => setAlive(false), pressure ? PRESSURE_EVICT_MS : IDLE_EVICT_MS);
+    const t = setTimeout(
+      () => setAlive(false),
+      pressure ? Math.min(PRESSURE_EVICT_MS, idleMs) : idleMs,
+    );
     return () => clearTimeout(t);
-  }, [active, alive, pressure, pin]);
+  }, [active, alive, pressure, pin, idleMs, warmToken]);
   return alive || active || pin;
 }
 
@@ -882,6 +981,9 @@ function RevealOnMount({ onReady }: { onReady?: () => void }) {
   return null;
 }
 
+// Once per session: a later Calendar visit joins or reads the preloaded load.
+let calendarPreloadStarted = false;
+
 function Shell({ onReady }: { onReady?: () => void }) {
   const {
     topKind,
@@ -926,6 +1028,7 @@ function Shell({ onReady }: { onReady?: () => void }) {
     stackKinds,
     chromeHidden,
   } = useView();
+  const selectView = useInstantNav();
   const { settings, update } = useSettings();
   const searchOpen = useSearchOpen();
   const { setOpen: setSearchOpen } = useSearchActions();
@@ -1319,7 +1422,9 @@ function Shell({ onReady }: { onReady?: () => void }) {
     };
     w.harbor = {
       ...w.harbor,
-      navigate: (v: string) => setView(v as View),
+      // Injected shells pass the native click; the hook reads its detail, modifiers and target.
+      navigate: (v: string, e?: MouseEvent) =>
+        selectView(v as View, e as unknown as React.MouseEvent<HTMLElement>, "shell"),
       back: () => goBack(),
       search: () => setSearchOpen(true),
       openSettings: () => setView("settings"),
@@ -1343,7 +1448,7 @@ function Shell({ onReady }: { onReady?: () => void }) {
       onUnread: (cb: (count: number) => void) =>
         typeof cb === "function" ? subscribeUnread(cb) : () => {},
     };
-  }, [setView, goBack, setSearchOpen, kid, settings.bigPictureButton]);
+  }, [setView, goBack, setSearchOpen, kid, settings.bigPictureButton, selectView]);
 
   useEffect(() => {
     if (topKind !== "live") {
@@ -1508,6 +1613,185 @@ function Shell({ onReady }: { onReady?: () => void }) {
   const moviesTop = topKind === "movies";
   const kidsTop = topKind === "kids";
   const showsTop = topKind === "shows";
+  const browseSuspended = playerActive || pickerTop || detailTop || episodeDetailTop;
+  const browseWarmTop = homeTop || calendarTop || moviesTop || showsTop;
+  const [warmAfterPlayer, setWarmAfterPlayer] = useState(false);
+  const [homeWarmToken, setHomeWarmToken] = useState(0);
+  const [discoverWarmToken, setDiscoverWarmToken] = useState(0);
+  const topKindRef = useRef(topKind);
+  topKindRef.current = topKind;
+  const browseCoordinator = useRef<ReturnType<typeof createPrefetchCoordinator> | null>(null);
+  if (!browseCoordinator.current)
+    browseCoordinator.current = createPrefetchCoordinator(scheduleBrowserIdle);
+  useEffect(() => {
+    const coordinator = browseCoordinator.current!;
+    // The disposable browser benchmark measures demand work before warming.
+    if (
+      import.meta.env.DEV &&
+      location.hostname === "127.0.0.1" &&
+      (window as Window & { __HARBOR_BENCHMARK__?: boolean }).__HARBOR_BENCHMARK__
+    )
+      return () => coordinator.pause();
+    let pressure = false;
+    const update = () => {
+      coordinator.pause();
+      if (
+        ((!browseSuspended && browseWarmTop) || (warmAfterPlayer && !playerActive)) &&
+        !pressure &&
+        document.visibilityState === "visible" &&
+        navigator.onLine
+      )
+        coordinator.start(browseWarmJobs(settings.tmdbKey, settings.region));
+    };
+    const unsubscribe = subscribeMemoryPressure((value) => {
+      pressure = value;
+      update();
+    });
+    document.addEventListener("visibilitychange", update);
+    window.addEventListener("online", update);
+    window.addEventListener("offline", update);
+    return () => {
+      unsubscribe();
+      document.removeEventListener("visibilitychange", update);
+      window.removeEventListener("online", update);
+      window.removeEventListener("offline", update);
+      coordinator.pause();
+    };
+    // `browseWarmTop` is intentionally a boolean, so Home -> Calendar (or
+    // Movies -> Shows) used to leave the previous route's speculative queue
+    // alive. That made old image work compete with the newly visible route.
+    // Re-run the fence for every top-level route transition; pause happens
+    // before the new idle queue is admitted.
+  }, [
+    browseSuspended,
+    browseWarmTop,
+    topKind,
+    settings.tmdbKey,
+    settings.region,
+    warmAfterPlayer,
+    playerActive,
+  ]);
+  // Once a player closes, Home and Discover are mounted parked and warmed, so the first switch to
+  // either does not wait for its build. Cancelled when a player opens again, on unmount, or under pressure.
+  const playerWasActiveRef = useRef(false);
+  useEffect(() => {
+    if (topKind !== "meta" && topKind !== "episode-detail" && topKind !== "player")
+      setWarmAfterPlayer(false);
+  }, [topKind]);
+  useEffect(() => {
+    if (playerActive) {
+      playerWasActiveRef.current = true;
+      setWarmAfterPlayer(false);
+      endParkedArtworkWarm();
+      return;
+    }
+    if (!playerWasActiveRef.current) return;
+    playerWasActiveRef.current = false;
+    // The disposable browser benchmark measures demand work before warming.
+    if (
+      import.meta.env.DEV &&
+      location.hostname === "127.0.0.1" &&
+      (window as Window & { __HARBOR_BENCHMARK__?: boolean }).__HARBOR_BENCHMARK__
+    )
+      return;
+    let stopped = false;
+    let cancel: () => void = () => {};
+    const whenIdle = (run: () => void): (() => void) => {
+      const win = window as Window & {
+        requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
+        cancelIdleCallback?: (handle: number) => void;
+      };
+      if (typeof win.requestIdleCallback !== "function") {
+        const t = window.setTimeout(run, 1200);
+        return () => window.clearTimeout(t);
+      }
+      const handle = win.requestIdleCallback(run, { timeout: 2500 });
+      return () => win.cancelIdleCallback?.(handle);
+    };
+    const stage = (delayMs: number, run: () => void) => {
+      const timer = window.setTimeout(() => {
+        cancel = whenIdle(() => {
+          if (!stopped) run();
+        });
+      }, delayMs);
+      cancel = () => window.clearTimeout(timer);
+    };
+    const unsubscribePressure = subscribeMemoryPressure((high) => {
+      if (!high) return;
+      stopped = true;
+      cancel();
+    });
+    if (!stopped)
+      stage(1500, () => {
+        warmParkedArtwork(90_000);
+        startTransition(() => setHomeWarmToken((n) => n + 1));
+        if (topKindRef.current === "meta" || topKindRef.current === "episode-detail")
+          setWarmAfterPlayer(true);
+        stage(2000, () => startTransition(() => setDiscoverWarmToken((n) => n + 1)));
+      });
+    return () => {
+      stopped = true;
+      unsubscribePressure();
+      cancel();
+    };
+  }, [playerActive]);
+  const { authKey } = useAuth();
+  const { isConnected: traktConnected } = useTrakt();
+  const { isConnected: simklConnected } = useSimkl();
+  const calendarPreload =
+    settings.calendarPreloadOnStartup && settings.calendarSource === "library";
+  useEffect(() => {
+    if (!calendarPreload || !authKey || calendarPreloadStarted) return;
+    // The disposable browser benchmark measures demand work before warming.
+    if (
+      import.meta.env.DEV &&
+      location.hostname === "127.0.0.1" &&
+      (window as Window & { __HARBOR_BENCHMARK__?: boolean }).__HARBOR_BENCHMARK__
+    )
+      return;
+    const controller = new AbortController();
+    let cancelIdle: (() => void) | undefined;
+    // Home loads first; the Calendar preload waits for it to settle.
+    const timer = window.setTimeout(() => {
+      cancelIdle = scheduleBrowserIdle(() => {
+        if (
+          controller.signal.aborted ||
+          calendarPreloadStarted ||
+          document.visibilityState !== "visible" ||
+          !navigator.onLine
+        )
+          return;
+        calendarPreloadStarted = true;
+        void import("@/views/calendar/use-calendar-data").then(({ preloadLibraryCalendar }) =>
+          preloadLibraryCalendar({
+            authKey,
+            settings,
+            traktConnected,
+            simklConnected,
+            signal: controller.signal,
+          }),
+        );
+      });
+    }, 4000);
+    return () => {
+      controller.abort();
+      window.clearTimeout(timer);
+      cancelIdle?.();
+    };
+    // Primitive deps only: settings is read when the effect starts, not on every change.
+  }, [calendarPreload, authKey, traktConnected, simklConnected, settings.tmdbKey]);
+  // Decoded artwork survives a short player or detail visit, so returning does not reload it. Only a
+  // longer stay releases it; speculative image work stops at once.
+  useEffect(() => {
+    if (!browseSuspended) return;
+    clearSpeculativeArtwork();
+    const timer = window.setTimeout(() => {
+      releaseBrowseCacheMemory();
+      releaseTmdbCatalogMemory();
+      releaseUnusedArtworkMemory();
+    }, PLAYER_EVICT_MS);
+    return () => window.clearTimeout(timer);
+  }, [browseSuspended]);
   const installFeatures = useInstallFeatures();
   const installFeaturesReady = useInstallFeaturesReady();
   const musicEnabled = installFeaturesReady && installFeatures.music;
@@ -1579,10 +1863,15 @@ function Shell({ onReady }: { onReady?: () => void }) {
   }, [topKind]);
 
   const layer = (top: boolean) => (top ? "contents harbor-layer-active" : "hidden");
+  // Parking must not restyle the page. Position and pointer-events stay the same in both states
+  // (children get pointer-events back from .harbor-park-layer in index.css), and visibility and
+  // `inert` are no longer toggled: each was an inherited change that restyled every node of a large
+  // page on return. content-visibility:hidden alone already skips painting, hit testing and
+  // focus for the parked subtree, and keyboard navigation skips [data-layer-inactive].
   const parkLayer = (top: boolean) =>
     top
-      ? "harbor-layer-active flex min-h-0 min-w-0 flex-1 flex-col"
-      : "flex min-h-0 min-w-0 flex-1 flex-col absolute inset-0 invisible pointer-events-none [content-visibility:hidden]";
+      ? "harbor-layer-active harbor-park-layer flex min-h-0 min-w-0 flex-col absolute inset-0 pointer-events-none"
+      : "harbor-park-layer flex min-h-0 min-w-0 flex-col absolute inset-0 pointer-events-none [content-visibility:hidden]";
 
   const layerProps = (top: boolean) => ({
     className: layer(top),
@@ -1592,7 +1881,6 @@ function Shell({ onReady }: { onReady?: () => void }) {
 
   const parkLayerProps = (top: boolean) => ({
     className: parkLayer(top),
-    inert: !top,
     "data-layer-inactive": !top ? "" : undefined,
   });
 
@@ -1623,10 +1911,11 @@ function Shell({ onReady }: { onReady?: () => void }) {
   }, [musicEnabled, activeProfileForMusic]);
 
   const overlayPinned = useOverlayPinned();
-  const homeAlive = useIdleEvict(homeTop);
-  const settingsAlive = useIdleEvict(settingsTop, overlayPinned);
+  const residentIdleMs = playerActive ? PLAYER_EVICT_MS : RESIDENT_EVICT_MS;
+  const homeAlive = useIdleEvict(homeTop, false, residentIdleMs, homeWarmToken);
+  const settingsAlive = useIdleEvict(settingsTop, overlayPinned, residentIdleMs);
   const animeAlive = useIdleEvict(animeTop);
-  const discoverAlive = useIdleEvict(discoverTop);
+  const discoverAlive = useIdleEvict(discoverTop, false, residentIdleMs, discoverWarmToken);
   const musicAlive = useIdleEvict(musicTop);
   const gamesAlive = useIdleEvict(gamesTop, stackKinds.includes("games"));
   const catalogsAlive = useIdleEvict(catalogsTop);

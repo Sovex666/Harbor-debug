@@ -12,6 +12,7 @@ import * as language from "../../src/lib/subtitles/language.ts";
 import { SubtitlePreparationError as RealSubtitlePreparationError } from "../../src/lib/subtitles/prepare.ts";
 import type { PlayerBridge, PlayerSnapshot } from "../../src/lib/player/bridge.ts";
 import type { MpvOptions } from "../../src/lib/player/mpv.ts";
+import { isBlockedDiskCacheOptionLine } from "../../src/lib/player/buffer-profile.ts";
 
 export function deferred<T = void>() {
   let resolve!: (value: T) => void;
@@ -97,9 +98,10 @@ export function mpvBridgeHarness(prefs = { volume: 0.35, muted: false }, options
         return () => handlers.delete(name);
       },
     },
-    "./buffer-profile": { autoBufferProfile, formatMpvBytes },
+    "./buffer-profile": { autoBufferProfile, formatMpvBytes, isBlockedDiskCacheOptionLine },
     "@/lib/native-memory": { getTotalPhysBytes: () => totalPhysBytes },
     "./pause-trace": { traceFrameDrops() {}, tracePlayback() {} },
+    "@/lib/perf/diagnostics": { recordDiagnostic() {} },
     "@/lib/subtitles/prepare": {
       prepareSubtitle: (input: { url: string }) => prepare(input),
       SubtitlePreparationError: RealSubtitlePreparationError,

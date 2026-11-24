@@ -5,6 +5,7 @@ import vm from "node:vm";
 import ts from "typescript";
 import * as cache from "../src/lib/cache.ts";
 import * as scheduler from "../src/lib/request-scheduler.ts";
+import { createThumbnailScheduler } from "../src/lib/thumbnail-scheduler.ts";
 import * as language from "../src/lib/episode-text-language.ts";
 import { mergeAnimeDetailExtras } from "../src/lib/providers/anime-detail-extras.ts";
 
@@ -339,6 +340,11 @@ function imageFixture(disk, invoke, now, failStorage = false) {
     "src/lib/remote-image-proxy.ts",
     {
       react: {
+        useRef(initial) {
+          const slot = index++;
+          if (!(slot in states)) states[slot] = { current: initial };
+          return states[slot];
+        },
         useState(initial) {
           const slot = index++;
           if (!(slot in states)) states[slot] = typeof initial === "function" ? initial() : initial;
@@ -357,6 +363,9 @@ function imageFixture(disk, invoke, now, failStorage = false) {
       },
       "@/lib/manga/sources/suwayomi/auth-registry": { suwayomiAuthFor: () => null },
       "@/lib/settings": { useSettings: () => ({ settings: { posterQuality: "high" } }) },
+      "./thumbnail-scheduler": { createThumbnailScheduler },
+      "./perf/diagnostics": { measureDiagnostic: () => () => {}, recordDiagnostic() {} },
+      "./image-readiness": { isImageLayerParked: () => false, onImageLayerResume: () => () => {} },
       "./object-url-cache": load(
         "src/lib/object-url-cache.ts",
         {},
@@ -382,10 +391,14 @@ function imageFixture(disk, invoke, now, failStorage = false) {
       },
     },
     {
-      window: { __TAURI_INTERNALS__: {} },
+      window: { __TAURI_INTERNALS__: {}, addEventListener() {} },
       Blob,
       Uint8Array,
       atob,
+      crypto,
+      performance,
+      AbortController,
+      DOMException,
       Date: { now },
       URL: { createObjectURL: () => "blob:cached-image" },
     },
@@ -413,7 +426,7 @@ test("public poster requests opt into the native persistent cache and clearing r
   const first = imageFixture(disk, invoke, () => 1000);
   first.render("https://artworks.thetvdb.com/season.jpg");
   await tick();
-  const fetchCall = calls.find((call) => call.name === "harbor_fetch");
+  const fetchCall = calls.find((call) => call.name === "harbor_image_fetch");
   assert.equal(fetchCall.args.args.cacheImage, true);
   assert.equal(fetchCall.args.args.maxResponseBytes, 32 * 1024 * 1024);
   assert.equal(disk.size, 1, "new images are stored by the native cache");

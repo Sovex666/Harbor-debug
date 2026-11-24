@@ -9,6 +9,7 @@ import {
 } from "react";
 import { stremioSourceProfileId, useProfiles, type Profile } from "./profiles";
 import { getUser, login as apiLogin, type User } from "./stremio";
+import { fenceLibraryProjections, invalidateLibraryProjections } from "./library-read-cache";
 
 type Session = { authKey: string; user: User };
 type AuthValue = {
@@ -77,6 +78,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const commitSession = useCallback(
     (fresh: Session) => {
+      fenceLibraryProjections();
       if (!activeProfile) {
         setSession(fresh);
         return;
@@ -109,6 +111,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(() => {
+    void invalidateLibraryProjections();
     if (!activeProfile) {
       setSession(null);
       return;

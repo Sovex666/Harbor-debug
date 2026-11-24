@@ -18,6 +18,11 @@ import {
   type Session,
   type SessionStatus,
 } from "@/lib/diagnostics/session";
+import {
+  initialSelfTestSteps,
+  runDiagnosticsSelfTest,
+  type SelfTestStep,
+} from "@/lib/diagnostics/self-test";
 
 type Tab = "capture" | "sessions" | "self-test";
 
@@ -35,6 +40,10 @@ export function DebuggingPanel() {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [selfTest, setSelfTest] = useState<{
+    steps: SelfTestStep[];
+    result: "idle" | "running" | "passed" | "failed";
+  }>(() => ({ steps: initialSelfTestSteps(), result: "idle" }));
   const refresh = useCallback(async () => {
     if (!isTauri()) return;
     const [p, s, list] = await Promise.all([
@@ -68,6 +77,19 @@ export function DebuggingPanel() {
       else if (status?.active) await stopDiagnosticsSession(status.active.sessionId);
       await writeDiagnosticsPreferences({ ...prefs, enabled });
     });
+  const runSelfTest = async () => {
+    setBusy(true);
+    setSelfTest({ steps: initialSelfTestSteps(), result: "running" });
+    try {
+      const { passed, steps } = await runDiagnosticsSelfTest((steps) =>
+        setSelfTest({ steps, result: "running" }),
+      );
+      setSelfTest({ steps, result: passed ? "passed" : "failed" });
+      await refresh().catch((e) => setError(String(e)));
+    } finally {
+      setBusy(false);
+    }
+  };
   useSubTabs(
     [
       { id: "capture", label: t("Capture") },
@@ -215,10 +237,52 @@ export function DebuggingPanel() {
         </Section>
       )}
       {tab === "self-test" && (
-        <Section title={t("Self-test")} subtitle={unavailable}>
-          <SettingRow label={t("Self-test progress")} desc={t("Not run")}>
-            <SButton disabled>{t("Run self-test")}</SButton>
+        <Section
+          title={t("Self-test")}
+          subtitle={
+            isTauri()
+              ? t(
+                  "Checks that diagnostic capture works on this device. It starts a short test session, writes events to disk, stops it, exports it as a ZIP and checks that it is listed. Your capture settings are not changed, and the test session is kept under Sessions like any other.",
+                )
+              : unavailable
+          }
+        >
+          <SettingRow
+            label={t("Self-test progress")}
+            desc={
+              selfTest.result === "running"
+                ? t("Running…")
+                : selfTest.result === "passed"
+                  ? t("All checks passed")
+                  : selfTest.result === "failed"
+                    ? t("A check failed")
+                    : status?.active
+                      ? t("Stop the active capture session first.")
+                      : t("Not run")
+            }
+          >
+            <SButton disabled={locked || !!status?.active} onClick={() => void runSelfTest()}>
+              {t("Run self-test")}
+            </SButton>
           </SettingRow>
+          {selfTest.steps.map((step) => (
+            <SettingRow
+              key={step.id}
+              label={t(step.label)}
+              desc={[
+                step.state === "running"
+                  ? t("Running…")
+                  : step.state === "passed"
+                    ? t("Passed")
+                    : step.state === "failed"
+                      ? t("Failed")
+                      : t("Not run"),
+                step.detail,
+              ]
+                .filter(Boolean)
+                .join(" · ")}
+            />
+          ))}
         </Section>
       )}
     </div>

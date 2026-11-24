@@ -1119,16 +1119,21 @@ const NAV_GROUPS: Array<{ heading: string | null; items: NavItem[] }> = [
         ],
       },
       {
-        id: "debugging",
-        label: "Debugging",
-        Icon: IconBug,
-        keywords: ["diagnostics", "capture", "session", "logs", "self test", "retention"],
-      },
-      {
         id: "advanced",
         label: "Advanced",
         Icon: IconAdvanced,
         keywords: ["dev", "logs", "cache", "reset", "experimental", "ffmpeg", "yt-dlp"],
+      },
+    ],
+  },
+  {
+    heading: "Debugging",
+    items: [
+      {
+        id: "debugging",
+        label: "Debugging",
+        Icon: IconBug,
+        keywords: ["diagnostics", "capture", "session", "logs", "self test", "retention"],
       },
     ],
   },

@@ -1868,7 +1868,7 @@ function Shell({ onReady }: { onReady?: () => void }) {
     const controller = new AbortController();
     let cancelIdle: (() => void) | undefined;
     // Start at launch, after the first idle frame. Titles resolved in the last
-    // 12 hours come from disk, so a warm start costs little network work.
+    // 30 days come from disk, so a warm start costs little network work.
     const timer = window.setTimeout(() => {
       cancelIdle = scheduleBrowserIdle(() => {
         if (

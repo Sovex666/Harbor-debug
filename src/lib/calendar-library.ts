@@ -141,8 +141,13 @@ type ResolvedSeries = {
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const seriesCache = new CalendarCache<ResolvedSeries | null>(240, CACHE_TTL_MS);
 const movieCache = new CalendarCache<CalendarItem | null>(240, CACHE_TTL_MS);
-/** A title's schedule rarely changes within a day, so a refresh reuses it from disk. */
-const TITLE_DISK_TTL_MS = 12 * 60 * 60 * 1000;
+/**
+ * Schedules are announced well in advance, so a refresh reuses a title from disk for 30 days.
+ * Trade-off: a surprise announcement for a title already resolved appears when its entry
+ * expires. Each entry covers 31 days back to 400 days ahead, so a month-old one still covers
+ * every month the calendar can show.
+ */
+const TITLE_DISK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const TITLE_PREFIX = "calendar-title-";
 let titleEpoch = 0;
 // A title's schedule does not depend on library membership, so library changes keep
@@ -637,7 +642,7 @@ async function resolveMovieCached(
   );
 }
 
-/** Reads a title resolved in the last 12 hours from disk; failures are never saved. */
+/** Reads a title resolved in the last 30 days from disk; failures are never saved. */
 async function savedTitle<T>(
   kind: "series" | "movie",
   scope: readonly unknown[],

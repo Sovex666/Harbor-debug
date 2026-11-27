@@ -491,7 +491,7 @@ test("snapshot bursts are batched within a 100ms publication window", async (t) 
   await outcome;
 });
 
-test("a relaunch reuses titles resolved within 12 hours and resolves only new ones", async (t) => {
+test("a relaunch reuses titles resolved within 30 days and resolves only new ones", async (t) => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-01T00:00:00Z") });
   const disk = new Map();
   const media = {
@@ -554,10 +554,16 @@ test("a relaunch reuses titles resolved within 12 hours and resolves only new on
   await second.resolve(["tt1", "tt2", "tt3"]);
   assert.deepEqual(lookups, [], "a library change keeps resolved titles");
 
-  t.mock.timers.tick(12 * 60 * 60 * 1000 + 1);
+  const day = 24 * 60 * 60 * 1000;
+  t.mock.timers.tick(29 * day);
   lookups.length = 0;
   await launch().resolve(["tt1"]);
-  assert.deepEqual(lookups, ["tt1"], "titles older than 12 hours resolve again");
+  assert.deepEqual(lookups, [], "a title stays cached for the whole month");
+
+  t.mock.timers.tick(day + 1);
+  lookups.length = 0;
+  await launch().resolve(["tt1"]);
+  assert.deepEqual(lookups, ["tt1"], "titles older than 30 days resolve again");
 
   lookups.length = 0;
   const third = launch();

@@ -810,6 +810,13 @@ const settingsRefinements: Record<string, string> = {
   "Poster cards": "بطاقات الملصقات",
   "Show a laurel tab on award-winning titles. Choose its position below.":
     "أظهر تبويب الغار في العناوين الحائزة على جوائز. اختر موضعه أدناه.",
+  "Saved to Downloads as {filename}. Attach it above.":
+    "تم الحفظ في التنزيلات باسم {filename}. أرفقه أعلاه.",
+  "Exports detailed logs across videos since the last successful export to your Downloads folder.":
+    "يصدّر سجلات مفصلة لجميع مقاطع الفيديو منذ آخر تصدير ناجح إلى مجلد التنزيلات.",
+  "Preload Calendar at startup": "تحميل التقويم مسبقًا عند بدء التشغيل",
+  "Starts loading your library's Calendar shortly after Harbor opens, so it's ready when you open it. Uses some network in the background.":
+    "يبدأ تحميل تقويم مكتبتك بعد فتح Harbor بقليل، ليكون جاهزًا عند فتحه. يستخدم بعض بيانات الشبكة في الخلفية.",
 };
 
 export default settingsRefinements;

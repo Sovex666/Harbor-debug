@@ -794,6 +794,13 @@ const settingsRefinements: Record<string, string> = {
   "The settings sidebar uses a separate icon set, not drawn by Abiyyu.":
     "Bilah samping pengaturan menggunakan set ikon terpisah yang tidak digambar oleh Abiyyu.",
   "Controller button glyphs:": "Simbol tombol pengontrol:",
+  "Saved to Downloads as {filename}. Attach it above.":
+    "Disimpan ke Unduhan sebagai {filename}. Lampirkan di atas.",
+  "Exports detailed logs across videos since the last successful export to your Downloads folder.":
+    "Mengekspor log terperinci dari semua video sejak ekspor terakhir yang berhasil ke folder Unduhan Anda.",
+  "Preload Calendar at startup": "Muat Kalender lebih awal saat memulai",
+  "Starts loading your library's Calendar shortly after Harbor opens, so it's ready when you open it. Uses some network in the background.":
+    "Mulai memuat Kalender perpustakaan Anda sesaat setelah Harbor dibuka, sehingga siap saat Anda membukanya. Menggunakan sedikit jaringan di latar belakang.",
 };
 
 export default settingsRefinements;

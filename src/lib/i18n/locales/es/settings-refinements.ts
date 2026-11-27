@@ -804,6 +804,13 @@ const settingsRefinements: Record<string, string> = {
   "The settings sidebar uses a separate icon set, not drawn by Abiyyu.":
     "La barra lateral de ajustes utiliza un conjunto de iconos independiente que no fue dibujado por Abiyyu.",
   "Controller button glyphs:": "Símbolos de los botones del mando:",
+  "Saved to Downloads as {filename}. Attach it above.":
+    "Guardado en Descargas como {filename}. Adjúntalo arriba.",
+  "Exports detailed logs across videos since the last successful export to your Downloads folder.":
+    "Exporta registros detallados de todos los vídeos desde la última exportación correcta a tu carpeta de Descargas.",
+  "Preload Calendar at startup": "Precargar el calendario al iniciar",
+  "Starts loading your library's Calendar shortly after Harbor opens, so it's ready when you open it. Uses some network in the background.":
+    "Empieza a cargar el calendario de tu biblioteca poco después de abrir Harbor, para que esté listo cuando lo abras. Usa algo de red en segundo plano.",
 };
 
 export default settingsRefinements;

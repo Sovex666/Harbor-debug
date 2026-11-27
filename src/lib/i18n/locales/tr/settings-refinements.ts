@@ -798,6 +798,13 @@ const settingsRefinements: Record<string, string> = {
   "The settings sidebar uses a separate icon set, not drawn by Abiyyu.":
     "Ayarlar kenar çubuğu, Abiyyu tarafından çizilmemiş ayrı bir simge seti kullanır.",
   "Controller button glyphs:": "Kontrolcü düğme simgeleri:",
+  "Saved to Downloads as {filename}. Attach it above.":
+    "İndirilenler klasörüne {filename} olarak kaydedildi. Yukarıya ekleyin.",
+  "Exports detailed logs across videos since the last successful export to your Downloads folder.":
+    "Son başarılı dışa aktarmadan bu yana tüm videoların ayrıntılı günlüklerini İndirilenler klasörüne aktarır.",
+  "Preload Calendar at startup": "Başlangıçta Takvimi önceden yükle",
+  "Starts loading your library's Calendar shortly after Harbor opens, so it's ready when you open it. Uses some network in the background.":
+    "Harbor açıldıktan kısa süre sonra kitaplığınızın Takvimini yüklemeye başlar, böylece açtığınızda hazır olur. Arka planda biraz ağ kullanır.",
 };
 
 export default settingsRefinements;

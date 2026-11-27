@@ -742,6 +742,13 @@ const settingsRefinements: Record<string, string> = {
   "The settings sidebar uses a separate icon set, not drawn by Abiyyu.":
     "设置侧边栏使用独立的图标集，并非由 Abiyyu 绘制。",
   "Controller button glyphs:": "控制器按钮图标：",
+  "Saved to Downloads as {filename}. Attach it above.":
+    "已保存到“下载”文件夹，文件名为 {filename}。请在上方附加。",
+  "Exports detailed logs across videos since the last successful export to your Downloads folder.":
+    "将自上次成功导出以来所有视频的详细日志导出到“下载”文件夹。",
+  "Preload Calendar at startup": "启动时预加载日历",
+  "Starts loading your library's Calendar shortly after Harbor opens, so it's ready when you open it. Uses some network in the background.":
+    "在 Harbor 打开后不久开始加载媒体库日历，打开时即可使用。会在后台使用少量网络。",
 };
 
 export default settingsRefinements;

@@ -789,6 +789,13 @@ const settingsRefinements: Record<string, string> = {
   "The settings sidebar uses a separate icon set, not drawn by Abiyyu.":
     "Thanh bên cài đặt sử dụng một bộ biểu tượng riêng, không do Abiyyu vẽ.",
   "Controller button glyphs:": "Ký hiệu nút tay cầm:",
+  "Saved to Downloads as {filename}. Attach it above.":
+    "Đã lưu vào Tải xuống với tên {filename}. Hãy đính kèm ở trên.",
+  "Exports detailed logs across videos since the last successful export to your Downloads folder.":
+    "Xuất nhật ký chi tiết của mọi video kể từ lần xuất thành công gần nhất vào thư mục Tải xuống.",
+  "Preload Calendar at startup": "Tải trước Lịch khi khởi động",
+  "Starts loading your library's Calendar shortly after Harbor opens, so it's ready when you open it. Uses some network in the background.":
+    "Bắt đầu tải Lịch của thư viện ngay sau khi mở Harbor, để sẵn sàng khi bạn mở. Sử dụng một ít mạng ở chế độ nền.",
 };
 
 export default settingsRefinements;

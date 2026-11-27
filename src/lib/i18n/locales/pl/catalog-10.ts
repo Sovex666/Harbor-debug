@@ -709,6 +709,7 @@ const catalog10: Record<string, string> = {
   "Reveal engine folder": "Pokaż folder silnika",
   "Reveal reviews": "Pokaż recenzje",
   "Reveal the show or movie artwork.": "Pokaż grafikę serialu lub filmu.",
+  "Refresh calendar": "Odśwież kalendarz",
 };
 
 export default catalog10;

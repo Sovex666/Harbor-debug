@@ -100,6 +100,7 @@ const library: Record<string, string> = {
   Tabs: "Вкладки",
   "Show tabs": "Показывать вкладки",
   "Choose which tabs appear in your library": "Выберите, какие вкладки показывать в библиотеке",
+  "Refresh calendar": "Обновить календарь",
 };
 
 export default library;

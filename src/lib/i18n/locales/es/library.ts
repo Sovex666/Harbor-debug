@@ -91,6 +91,7 @@ const library: Record<string, string> = {
   Tabs: "Pestañas",
   "Show tabs": "Mostrar pestañas",
   "Choose which tabs appear in your library": "Elige qué pestañas aparecen en tu biblioteca",
+  "Refresh calendar": "Actualizar calendario",
 };
 
 export default library;

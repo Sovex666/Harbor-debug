@@ -99,6 +99,7 @@ const library: Record<string, string> = {
   Tabs: "タブ",
   "Show tabs": "表示するタブ",
   "Choose which tabs appear in your library": "ライブラリに表示するタブを選択",
+  "Refresh calendar": "カレンダーを更新",
 };
 
 export default library;

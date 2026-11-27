@@ -93,6 +93,7 @@ const library: Record<string, string> = {
   "Show tabs": "Afficher les onglets",
   "Choose which tabs appear in your library":
     "Choisissez les onglets affichés dans votre bibliothèque",
+  "Refresh calendar": "Actualiser le calendrier",
 };
 
 export default library;

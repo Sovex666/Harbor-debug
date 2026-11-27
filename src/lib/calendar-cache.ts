@@ -60,6 +60,11 @@ export class CalendarCache<T> {
     return promise;
   }
 
+  /** Replaces a value resolved outside `fetch`, such as a background re-check. */
+  set(key: string, value: T): void {
+    lruSet(this.values, key, { at: Date.now(), value, revision: 0 }, this.max);
+  }
+
   subscribe(listener: () => void): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

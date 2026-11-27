@@ -1221,6 +1221,7 @@ const catalog06: Record<string, string> = {
   "Rename profile": "Rinomina profilo",
   "Rename row": "Rinomina riga",
   "Rename {name}": "Rinomina {name}",
+  "Refresh calendar": "Aggiorna calendario",
 };
 
 export default catalog06;

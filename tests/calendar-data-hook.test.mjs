@@ -79,8 +79,17 @@ function fixture(sourceApi) {
   };
   // The hook loads the library resolver and core helpers separately from the sources.
   mocks["@/lib/calendar-core"] = { monthRangeISO: mocks["@/lib/calendar"].monthRangeISO };
+  let titleRevision = 0;
+  const titleListeners = new Set();
   mocks["@/lib/calendar-library"] = {
     fetchLibraryCalendar: (...args) => mocks["@/lib/calendar-sources"].fetchLibraryCalendar(...args),
+    libraryTitleRevision: () => titleRevision,
+    libraryTitlesRefreshing: () => false,
+    subscribeLibraryTitles: (listener) => {
+      titleListeners.add(listener);
+      return () => titleListeners.delete(listener);
+    },
+    refreshLibraryCalendarTitles: async () => {},
   };
   const source = "src/views/calendar/use-calendar-data.ts";
   // Separate harnesses execute the module afresh; share its cache to model real remounts.
@@ -125,6 +134,10 @@ function fixture(sourceApi) {
     },
     refreshSources() {
       sourceRevision++;
+    },
+    updateTitles() {
+      titleRevision++;
+      titleListeners.forEach((listener) => listener());
     },
     invalidate(next = scope) {
       scope = next;
@@ -349,6 +362,37 @@ test("unrelated source notifications do not restart a personal library load", as
   await flushPromises();
   assert.equal(f.calls.length, 1);
   assert.equal(f.calls[0].args[3].signal.aborted, false);
+  h.unmount();
+});
+
+test("a background title update reloads the library month with its rows visible", async () => {
+  const f = fixture();
+  const h = f.create();
+  h.render(f.args);
+  await flushPromises();
+  f.calls[0].wait.resolve([{ id: "saved" }]);
+  await flushPromises();
+  assert.deepEqual(h.render(f.args).items, [{ id: "saved" }]);
+
+  f.updateTitles();
+  const during = h.render(f.args);
+  await flushPromises();
+  assert.deepEqual(during.items, [{ id: "saved" }]);
+  assert.equal(during.loading, false, "an update never blanks the month");
+  assert.equal(f.calls.length, 2);
+  f.calls[1].wait.resolve([{ id: "updated" }]);
+  await flushPromises();
+  assert.deepEqual(h.render(f.args).items, [{ id: "updated" }]);
+
+  // Other sources do not resolve library titles, so an update leaves them alone.
+  const trakt = { ...f.args, source: "trakt" };
+  h.render(trakt);
+  await flushPromises();
+  const before = f.calls.length;
+  f.updateTitles();
+  h.render(trakt);
+  await flushPromises();
+  assert.equal(f.calls.length, before);
   h.unmount();
 });
 

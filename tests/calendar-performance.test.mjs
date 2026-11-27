@@ -491,8 +491,8 @@ test("snapshot bursts are batched within a 100ms publication window", async (t) 
   await outcome;
 });
 
-test("a relaunch reuses titles resolved within 30 days and resolves only new ones", async (t) => {
-  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-10-01T00:00:00Z") });
+function savedTitleFixture(t, { release = {}, tmdbGet } = {}) {
+  t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: new Date("2026-10-01T00:00:00Z") });
   const disk = new Map();
   const media = {
     readMediaValue: async (namespace, key) => {
@@ -508,6 +508,11 @@ test("a relaunch reuses titles resolved within 30 days and resolves only new one
     },
   };
   const lookups = [];
+  const lookup = (id) => {
+    lookups.push(id);
+    if (id === "tt-broken") throw new Error("offline");
+    return { id, name: id, releaseDate: release[id] ?? "2026-10-10" };
+  };
   const launch = () => {
     const clearers = [];
     const api = loadLibrary({
@@ -517,58 +522,158 @@ test("a relaunch reuses titles resolved within 30 days and resolves only new one
         calendarScopeKey: () => "scope",
         registerCalendarCache: (clear) => clearers.push(clear),
       },
-      "./cinemeta": {
-        meta: async (_type, id) => {
-          lookups.push(id);
-          if (id === "tt-broken") throw new Error("offline");
-          return { id, name: id, releaseDate: "2026-10-10" };
+      "./cinemeta": { meta: async (_type, id) => lookup(id) },
+      "./providers/tmdb/tmdb-client": { effectiveTmdbLanguage: () => "en-US", get: tmdbGet },
+      "./providers/tmdb/tmdb-calendar": {
+        tmdbMovieRelease: async (_key, movieId) => {
+          const row = lookup(`tmdb:movie:${movieId}`);
+          return { ...row, poster: null, background: null, isAnime: false, overview: "" };
         },
       },
     });
-    const resolve = (ids) =>
+    const resolve = (ids, tmdbKey = "") =>
       api
         .resolveSavedCalendar(
           ids.map((id) => candidate(id, "movie")),
           2026,
           9,
-          { tmdbKey: "" },
+          { tmdbKey },
         )
         .catch((error) => error.items);
-    return { resolve, clear: (purge) => clearers.forEach((fn) => fn(purge)) };
+    return { api, resolve, clear: (purge) => clearers.forEach((fn) => fn(purge)) };
   };
-  const flushWrites = () => new Promise((resolve) => setImmediate(resolve));
+  const settle = async () => {
+    for (let i = 0; i < 20; i++) {
+      await new Promise((resolve) => setImmediate(resolve));
+      for (let j = 0; j < 20; j++) await Promise.resolve();
+    }
+  };
+  return { disk, lookups, launch, settle, release };
+}
 
+const DAY = 24 * 60 * 60 * 1000;
+
+test("a relaunch shows saved titles at once and resolves only new or failed ones", async (t) => {
+  const { lookups, launch, settle } = savedTitleFixture(t);
   const first = launch();
   assert.equal((await first.resolve(["tt1", "tt2", "tt-broken"])).length, 2);
-  await flushWrites();
+  await settle();
   assert.deepEqual(lookups.sort(), ["tt-broken", "tt1", "tt2"]);
 
   lookups.length = 0;
   const second = launch();
   assert.equal((await second.resolve(["tt1", "tt2", "tt3", "tt-broken"])).length, 3);
-  await flushWrites();
+  await settle();
   assert.deepEqual(lookups.sort(), ["tt-broken", "tt3"], "only new and failed titles resolve");
 
   lookups.length = 0;
   second.clear(false);
   await second.resolve(["tt1", "tt2", "tt3"]);
-  assert.deepEqual(lookups, [], "a library change keeps resolved titles");
-
-  const day = 24 * 60 * 60 * 1000;
-  t.mock.timers.tick(29 * day);
-  lookups.length = 0;
-  await launch().resolve(["tt1"]);
-  assert.deepEqual(lookups, [], "a title stays cached for the whole month");
-
-  t.mock.timers.tick(day + 1);
-  lookups.length = 0;
-  await launch().resolve(["tt1"]);
-  assert.deepEqual(lookups, ["tt1"], "titles older than 30 days resolve again");
+  t.mock.timers.tick(60_000);
+  await settle();
+  assert.deepEqual(lookups, [], "a library change keeps fresh titles without re-checks");
 
   lookups.length = 0;
   const third = launch();
   third.clear(true);
-  await flushWrites();
+  await settle();
   await third.resolve(["tt1"]);
   assert.deepEqual(lookups, ["tt1"], "an explicit clear forgets saved titles");
+});
+
+test("titles older than three days are re-checked in the background", async (t) => {
+  const { lookups, launch, settle, release } = savedTitleFixture(t, {
+    // Released before the window: a finished movie only needs a monthly re-check.
+    release: { "tt-old": "2026-01-05" },
+  });
+  await launch().resolve(["tt1", "tt-old"]);
+  await settle();
+
+  t.mock.timers.tick(4 * DAY);
+  lookups.length = 0;
+  release.tt1 = "2026-10-20";
+  const later = launch();
+  const revisions = [];
+  later.api.subscribeLibraryTitles(() => revisions.push(later.api.libraryTitleRevision()));
+  const shown = await later.resolve(["tt1", "tt-old"]);
+  assert.deepEqual(lookups, [], "saved titles render without waiting for the network");
+  assert.equal(shown[0].releaseDate, "2026-10-10");
+
+  t.mock.timers.tick(8_000);
+  await settle();
+  assert.deepEqual(lookups, ["tt1"], "only the airing title is due; the finished one is not");
+  assert.deepEqual(revisions, [1], "one update reloads the visible month");
+  const updated = await later.resolve(["tt1", "tt-old"]);
+  assert.equal(updated[0].releaseDate, "2026-10-20", "the re-checked date replaces the saved one");
+
+  lookups.length = 0;
+  t.mock.timers.tick(8_000);
+  await settle();
+  assert.deepEqual(lookups, [], "a title is re-checked at most once per session");
+
+  t.mock.timers.tick(27 * DAY);
+  lookups.length = 0;
+  await launch().resolve(["tt-old"]);
+  t.mock.timers.tick(8_000);
+  await settle();
+  assert.deepEqual(lookups, ["tt-old"], "a finished title is re-checked after 30 days");
+});
+
+test("Refresh re-checks every shown title and reports when it finishes", async (t) => {
+  const { lookups, launch, settle } = savedTitleFixture(t);
+  const app = launch();
+  await app.resolve(["tt1", "tt2"]);
+  await settle();
+  lookups.length = 0;
+
+  let finished = false;
+  const done = app.api.refreshLibraryCalendarTitles().then(() => (finished = true));
+  assert.equal(app.api.libraryTitlesRefreshing(), true);
+  assert.equal(app.api.refreshLibraryCalendarTitles(), app.api.refreshLibraryCalendarTitles());
+  await settle();
+  await done;
+  assert.equal(finished, true);
+  assert.equal(app.api.libraryTitlesRefreshing(), false);
+  assert.deepEqual(lookups.sort(), ["tt1", "tt2"], "Refresh does not wait for the re-check age");
+  assert.equal(app.api.libraryTitleRevision(), 0, "unchanged titles do not reload the month");
+});
+
+test("TMDB's change list re-checks edited titles once a day", async (t) => {
+  const storage = new Map();
+  const previous = globalThis.localStorage;
+  globalThis.localStorage = {
+    getItem: (key) => storage.get(key) ?? null,
+    setItem: (key, value) => storage.set(key, String(value)),
+  };
+  t.after(() => {
+    globalThis.localStorage = previous;
+  });
+  const requests = [];
+  const { lookups, launch, settle } = savedTitleFixture(t, {
+    tmdbGet: async (_key, path, params) => {
+      requests.push([path, params.page]);
+      if (path === "movie/changes") {
+        return params.page === "1"
+          ? { results: [{ id: 7 }], total_pages: 2 }
+          : { results: [{ id: 99 }], total_pages: 2 };
+      }
+      return { results: [], total_pages: 1 };
+    },
+  });
+  const app = launch();
+  await app.resolve(["tmdb:movie:7", "tmdb:movie:8"], "key");
+  await settle();
+  lookups.length = 0;
+
+  assert.equal(await app.api.checkTmdbChanges("key", Date.now() + 1), 1);
+  await settle();
+  assert.deepEqual(lookups, ["tmdb:movie:7"], "only the edited title is re-checked");
+  assert.deepEqual(
+    requests.filter(([path]) => path === "movie/changes").map(([, page]) => page),
+    ["1", "2"],
+  );
+
+  requests.length = 0;
+  assert.equal(await app.api.checkTmdbChanges("key", Date.now() + 2), 0);
+  assert.deepEqual(requests, [], "the list is read at most once a day");
 });

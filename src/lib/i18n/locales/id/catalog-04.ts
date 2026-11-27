@@ -978,6 +978,7 @@ const catalog: Record<string, string> = {
   "Relative to your main subtitle size.": "Relatif terhadap ukuran subtitle utama Anda.",
   Relay: "Relay",
   "Relay URL": "URL relay",
+  "Refresh calendar": "Segarkan kalender",
 };
 
 export default catalog;

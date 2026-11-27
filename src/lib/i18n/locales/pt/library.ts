@@ -100,6 +100,7 @@ const library: Record<string, string> = {
   Tabs: "Abas",
   "Show tabs": "Mostrar abas",
   "Choose which tabs appear in your library": "Escolha quais abas aparecem na sua biblioteca",
+  "Refresh calendar": "Atualizar calendário",
 };
 
 export default library;

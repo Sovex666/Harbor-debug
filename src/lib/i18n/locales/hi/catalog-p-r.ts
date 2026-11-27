@@ -1378,6 +1378,7 @@ const catalogPR: Record<string, string> = {
   review: "समीक्षा",
   right: "दायाँ",
   "rpdb key": "rpdb कुंजी",
+  "Refresh calendar": "कैलेंडर रीफ़्रेश करें",
 };
 
 export default catalogPR;

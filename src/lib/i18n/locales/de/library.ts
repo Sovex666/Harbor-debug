@@ -104,6 +104,7 @@ const library: Record<string, string> = {
   "Show tabs": "Tabs anzeigen",
   "Choose which tabs appear in your library":
     "Wähle, welche Tabs in deiner Mediathek angezeigt werden",
+  "Refresh calendar": "Kalender aktualisieren",
 };
 
 export default library;

@@ -132,6 +132,7 @@ const library: Record<string, string> = {
   Tabs: "التبويبات",
   "Show tabs": "إظهار التبويبات",
   "Choose which tabs appear in your library": "اختر التبويبات التي تظهر في مكتبتك",
+  "Refresh calendar": "تحديث التقويم",
 };
 
 export default library;

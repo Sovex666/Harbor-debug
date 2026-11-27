@@ -999,6 +999,7 @@ const catalog07: Record<string, string> = {
   "Rate {count} stars": "별 {count}개로 평가",
   Rated: "평가함",
   "Rated {r}+": "평점 {r} 이상",
+  "Refresh calendar": "캘린더 새로고침",
 };
 
 export default catalog07;

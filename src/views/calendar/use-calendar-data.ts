@@ -21,7 +21,32 @@ type CalendarSources = typeof import("@/lib/calendar-sources");
 let loadedSources: CalendarSources | null = null;
 const loadSources = () =>
   import("@/lib/calendar-sources").then((sources) => (loadedSources = sources));
-const loadLibrary = () => import("@/lib/calendar-library");
+type CalendarLibrary = typeof import("@/lib/calendar-library");
+let loadedLibrary: CalendarLibrary | null = null;
+const loadLibrary = () =>
+  import("@/lib/calendar-library").then((library) => (loadedLibrary = library));
+
+/** Background title re-checks and Refresh re-run the library month from memory. */
+function subscribeLibraryTitles(listener: () => void): () => void {
+  let active = true;
+  let unsubscribe = () => {};
+  void loadLibrary()
+    .then((library) => {
+      if (!active) return;
+      unsubscribe = library.subscribeLibraryTitles(listener);
+      listener();
+    })
+    .catch(() => {});
+  return () => {
+    active = false;
+    unsubscribe();
+  };
+}
+
+/** Re-checks every library title shown this session; saved rows stay on screen meanwhile. */
+export function refreshLibraryCalendar(): Promise<void> {
+  return loadLibrary().then((library) => library.refreshLibraryCalendarTitles());
+}
 
 function subscribeSourceCache(listener: () => void): () => void {
   let active = true;
@@ -258,7 +283,17 @@ export function useCalendarData({
     subscribeSourceCache,
     () => loadedSources?.calendarSourceCacheRevision(sourceKey) ?? 0,
   );
-  const sourceRefreshRevision = sourceKey === undefined ? 0 : sourceRevision;
+  const titleRevision = useSyncExternalStore(
+    subscribeLibraryTitles,
+    () => loadedLibrary?.libraryTitleRevision() ?? 0,
+  );
+  const refreshing = useSyncExternalStore(
+    subscribeLibraryTitles,
+    () => loadedLibrary?.libraryTitlesRefreshing() ?? false,
+  );
+  const resolvesTitles = source === "library" || source === "simkl";
+  const sourceRefreshRevision =
+    sourceKey !== undefined ? sourceRevision : resolvesTitles ? titleRevision : 0;
   const browseCacheNow = useBrowseCacheUpdates(source !== "library" && source !== "simkl");
   // Library and simkl do not read the browse cache, so their warm key must not follow it.
   const browseRevision = source === "library" || source === "simkl" ? 0 : browseCacheNow;
@@ -550,9 +585,21 @@ export function useCalendarData({
 
   if (state.key !== requestKey) {
     const cached = warmCalendar.peek(warmKey);
-    return { items: cached ?? [], loading: cached === undefined, error: null, progress: null };
+    return {
+      items: cached ?? [],
+      loading: cached === undefined,
+      error: null,
+      progress: null,
+      refreshing: resolvesTitles && refreshing,
+    };
   }
-  return { items: state.items, loading: state.loading, error: state.error, progress };
+  return {
+    items: state.items,
+    loading: state.loading,
+    error: state.error,
+    progress,
+    refreshing: resolvesTitles && refreshing,
+  };
 }
 
 /**

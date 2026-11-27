@@ -1165,6 +1165,7 @@ const sweepE: Record<string, string> = {
   "Submitting…": "正在提交…",
   Subsource: "Subsource",
   Subtitles: "字幕",
+  "Refresh calendar": "刷新日历",
 };
 
 export default sweepE;

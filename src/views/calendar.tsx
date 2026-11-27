@@ -2,6 +2,7 @@ import {
   Calendar as CalendarIcon,
   ChevronLeft,
   ChevronRight,
+  RefreshCw,
   SlidersHorizontal,
   Star,
 } from "lucide-react";
@@ -16,7 +17,7 @@ import {
 import { CalendarSkeleton } from "./calendar/calendar-skeleton";
 import { CalendarConfigRail } from "./calendar/config/config-rail";
 import { buildActiveCount } from "./calendar/config/rail-sources";
-import { useCalendarData } from "./calendar/use-calendar-data";
+import { refreshLibraryCalendar, useCalendarData } from "./calendar/use-calendar-data";
 import { useAuth } from "@/lib/auth";
 import type { LibraryItem } from "@/lib/stremio";
 import { readLibraryProjection } from "@/lib/library-read-cache";
@@ -111,7 +112,7 @@ export function CalendarView({
   const { isConnected: traktConnected } = useTrakt();
   const { isConnected: simklConnected } = useSimkl();
 
-  const { items, loading, error, progress } = useCalendarData({
+  const { items, loading, error, progress, refreshing } = useCalendarData({
     source,
     authKey,
     traktConnected,
@@ -304,6 +305,21 @@ export function CalendarView({
                 <ChevronRight size={16} strokeWidth={2.2} className="dir-icon" />
               )}
             </button>
+            {(source === "library" || source === "simkl") && (
+              <button
+                onClick={() => void refreshLibraryCalendar().catch(() => {})}
+                disabled={refreshing}
+                className="flex h-10 w-10 items-center justify-center rounded-full border border-edge-soft text-ink-muted transition-colors hover:border-edge hover:text-ink disabled:opacity-60"
+                aria-label={refreshing ? t("Refreshing…") : t("Refresh calendar")}
+                title={refreshing ? t("Refreshing…") : t("Refresh calendar")}
+              >
+                <RefreshCw
+                  size={15}
+                  strokeWidth={2.2}
+                  className={refreshing ? "animate-spin" : undefined}
+                />
+              </button>
+            )}
             {source !== "games" && (
               <>
                 <span className="mx-1 h-5 w-px bg-edge-soft" />

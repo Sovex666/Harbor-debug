@@ -1,4 +1,4 @@
-import { effectiveTmdbLanguage } from "./providers/tmdb/tmdb-client";
+import { effectiveTmdbLanguage, get as tmdbGet } from "./providers/tmdb/tmdb-client";
 import { mapCalendarLimit as mapLimit } from "./calendar-scheduler";
 import { CalendarCache } from "./calendar-cache";
 import { registerCalendarCache } from "./calendar-cache-scope";
@@ -141,13 +141,22 @@ type ResolvedSeries = {
 const CACHE_TTL_MS = 30 * 60 * 1000;
 const seriesCache = new CalendarCache<ResolvedSeries | null>(240, CACHE_TTL_MS);
 const movieCache = new CalendarCache<CalendarItem | null>(240, CACHE_TTL_MS);
+const DAY_MS = 24 * 60 * 60 * 1000;
 /**
- * Schedules are announced well in advance, so a refresh reuses a title from disk for 30 days.
- * Trade-off: a surprise announcement for a title already resolved appears when its entry
- * expires. Each entry covers 31 days back to 400 days ahead, so a month-old one still covers
- * every month the calendar can show.
+ * A saved title is shown immediately and re-checked in the background once it is older than
+ * its re-check age, so a surprise announcement appears within days rather than at expiry.
+ * Each entry covers 31 days back to 400 days ahead, so an old one still covers every month
+ * the calendar can show.
  */
-const TITLE_DISK_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const TITLE_RECHECK_MS = 3 * DAY_MS;
+const TITLE_DISK_TTL_MS = 30 * DAY_MS;
+/** A show whose whole run has ended, or a movie released before the window, rarely changes. */
+const ENDED_RECHECK_MS = 30 * DAY_MS;
+const ENDED_DISK_TTL_MS = 180 * DAY_MS;
+/** Background re-checks wait for the first load and use a small share of the TMDB queue. */
+const RECHECK_DELAY_MS = 8_000;
+const RECHECK_CONCURRENCY = 2;
+const KNOWN_TITLES_MAX = 4_000;
 const TITLE_PREFIX = "calendar-title-";
 let titleEpoch = 0;
 // A title's schedule does not depend on library membership, so library changes keep
@@ -157,8 +166,212 @@ registerCalendarCache((purge = true) => {
   titleEpoch++;
   seriesCache.clear();
   movieCache.clear();
+  knownTitles.clear();
+  recheckQueue.clear();
+  rechecked.clear();
   void removeMediaNamespaces(TITLE_PREFIX).catch(() => {});
 });
+
+/** What a resolver learned besides the value: whether the title is finished, and its TMDB id. */
+type TitleMeta = { ended: boolean; tmdb: number | null };
+type SavedTitleEntry<T> = { value: T; checkedAt?: number; ended?: boolean; tmdb?: number | null };
+type KnownTitle = {
+  kind: "series" | "movie";
+  tmdb: number | null;
+  checkedAt: number;
+  recheck: () => Promise<void>;
+};
+
+/** Titles read this session, keyed by their memory-cache key. */
+const knownTitles = new Map<string, KnownTitle>();
+/** Queued re-checks; `true` marks a requested one (Refresh or the TMDB change list). */
+const recheckQueue = new Map<string, boolean>();
+/** Automatic re-checks run at most once per title per session. */
+const rechecked = new Set<string>();
+let recheckActive = 0;
+let recheckTimer: ReturnType<typeof setTimeout> | undefined;
+let refreshing: { done: Promise<void>; finish: () => void } | null = null;
+let titlesChanged = false;
+let lastTitleNotify = 0;
+let titleRevision = 0;
+const titleListeners = new Set<() => void>();
+
+/** `changed` re-runs the visible month; otherwise only the Refresh state is reported. */
+function notifyTitles(changed = true): void {
+  if (changed) {
+    titleRevision++;
+    lastTitleNotify = Date.now();
+  }
+  for (const listener of titleListeners) listener();
+}
+
+/** Changes when a background re-check updated a title, or a Refresh started or finished. */
+export function libraryTitleRevision(): number {
+  return titleRevision;
+}
+
+export function subscribeLibraryTitles(listener: () => void): () => void {
+  titleListeners.add(listener);
+  return () => titleListeners.delete(listener);
+}
+
+export function libraryTitlesRefreshing(): boolean {
+  return refreshing !== null;
+}
+
+/** Re-checks every title this session has shown, keeping the saved ones on screen meanwhile. */
+export function refreshLibraryCalendarTitles(): Promise<void> {
+  if (refreshing) return refreshing.done;
+  for (const key of knownTitles.keys()) recheckQueue.set(key, true);
+  if (!recheckQueue.size) return Promise.resolve();
+  let finish = () => {};
+  const done = new Promise<void>((resolve) => (finish = resolve));
+  refreshing = { done, finish };
+  notifyTitles(false);
+  pumpRechecks();
+  return done;
+}
+
+function queueRecheck(key: string, requested: boolean): void {
+  if (!requested && (rechecked.has(key) || recheckQueue.has(key))) return;
+  recheckQueue.set(key, requested || recheckQueue.get(key) === true);
+  if (requested) pumpRechecks();
+  else
+    recheckTimer ??= setTimeout(() => {
+      recheckTimer = undefined;
+      pumpRechecks();
+    }, RECHECK_DELAY_MS);
+}
+
+/** Requested re-checks first, then the title checked longest ago. */
+function nextRecheck(): string | undefined {
+  let best: string | undefined;
+  let bestRequested = false;
+  let bestAt = Infinity;
+  for (const [key, requested] of recheckQueue) {
+    const at = knownTitles.get(key)?.checkedAt ?? 0;
+    if ((requested && !bestRequested) || (requested === bestRequested && at < bestAt)) {
+      best = key;
+      bestRequested = requested;
+      bestAt = at;
+    }
+  }
+  return best;
+}
+
+function pumpRechecks(): void {
+  const limit = refreshing ? TMDB_CONCURRENCY : RECHECK_CONCURRENCY;
+  while (recheckActive < limit) {
+    const key = nextRecheck();
+    if (key === undefined) break;
+    recheckQueue.delete(key);
+    rechecked.add(key);
+    const title = knownTitles.get(key);
+    if (!title) continue;
+    recheckActive++;
+    void title
+      .recheck()
+      .catch(() => {})
+      .finally(() => {
+        recheckActive--;
+        // Batch screen updates: each one re-runs the visible month from memory.
+        if (titlesChanged && Date.now() - lastTitleNotify > 4_000) {
+          titlesChanged = false;
+          notifyTitles();
+        }
+        pumpRechecks();
+      });
+  }
+  if (recheckActive || recheckQueue.size) return;
+  const finished = refreshing;
+  refreshing = null;
+  if (titlesChanged || finished) {
+    notifyTitles(titlesChanged);
+    titlesChanged = false;
+  }
+  finished?.finish();
+}
+
+/** TMDB's change lists name every title edited in a date range, so edits surface within a day. */
+const CHANGES_STORAGE_KEY = "harbor.calendar.tmdb-changes.v1";
+const CHANGES_MAX_DAYS = 14;
+/** Each page lists 100 ids. A busy range is read partially; the age re-check still applies. */
+const CHANGES_MAX_PAGES = 60;
+let changesScheduled = false;
+
+function scheduleTmdbChanges(tmdbKey: string): void {
+  if (!tmdbKey || changesScheduled) return;
+  changesScheduled = true;
+  setTimeout(() => void checkTmdbChanges(tmdbKey).catch(() => {}), RECHECK_DELAY_MS * 2);
+}
+
+function readChangesCheckedAt(): number {
+  try {
+    return Number(localStorage.getItem(CHANGES_STORAGE_KEY)) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+function utcDate(ms: number): string {
+  return new Date(ms).toISOString().slice(0, 10);
+}
+
+async function changedTmdbIds(
+  tmdbKey: string,
+  kind: "tv" | "movie",
+  startDate: string,
+  endDate: string,
+): Promise<Set<number> | null> {
+  type Page = { results?: Array<{ id?: number }>; total_pages?: number };
+  const read = (page: number) =>
+    tmdbGet<Page>(tmdbKey, `${kind}/changes`, {
+      start_date: startDate,
+      end_date: endDate,
+      page: String(page),
+    });
+  const first = await read(1);
+  if (!first) return null;
+  const pages = Math.min(first.total_pages ?? 1, CHANGES_MAX_PAGES);
+  const rest = await mapLimit(
+    Array.from({ length: Math.max(0, pages - 1) }, (_, i) => i + 2),
+    RECHECK_CONCURRENCY,
+    (page) => read(page).catch(() => null),
+  );
+  const ids = new Set<number>();
+  for (const page of [first, ...rest]) {
+    if (!page) return null;
+    for (const row of page.results ?? []) if (Number.isFinite(row.id)) ids.add(row.id as number);
+  }
+  return ids;
+}
+
+/** At most once a day: re-check every known title TMDB reports as edited since the last run. */
+export async function checkTmdbChanges(tmdbKey: string, now = Date.now()): Promise<number> {
+  const last = readChangesCheckedAt();
+  if (now - last < DAY_MS) return 0;
+  // Titles checked before the range began are already due for their age re-check.
+  const start = Math.max(last || now - TITLE_RECHECK_MS, now - CHANGES_MAX_DAYS * DAY_MS);
+  const [tv, movie] = await Promise.all([
+    changedTmdbIds(tmdbKey, "tv", utcDate(start), utcDate(now)),
+    changedTmdbIds(tmdbKey, "movie", utcDate(start), utcDate(now)),
+  ]);
+  // A failed page leaves the range unchecked, so the next launch reads it again.
+  if (!tv || !movie) return 0;
+  try {
+    localStorage.setItem(CHANGES_STORAGE_KEY, String(now));
+  } catch {
+    /* The age re-check still applies without a stored time. */
+  }
+  let queued = 0;
+  for (const [key, title] of knownTitles) {
+    if (title.tmdb == null || title.checkedAt >= now) continue;
+    if (!(title.kind === "series" ? tv : movie).has(title.tmdb)) continue;
+    queueRecheck(key, true);
+    queued++;
+  }
+  return queued;
+}
 
 function wideWindow(): (iso: string) => boolean {
   const lo = Date.now() - 31 * 864e5;
@@ -223,6 +436,7 @@ async function animeUpcoming(
   id: string,
   inWindow: (date: string) => boolean,
   tmdbKey: string,
+  meta: TitleMeta,
 ): Promise<ResolvedSeries | null> {
   const numId = animeNumericId(id);
   if (numId == null) return null;
@@ -267,6 +481,7 @@ async function animeUpcoming(
   let poster: string | null = null;
   const tmdbId = mapping.mappings?.themoviedb_id;
   const numTmdbId = typeof tmdbId === "string" ? Number(tmdbId) : tmdbId;
+  if (numTmdbId != null && Number.isFinite(numTmdbId)) meta.tmdb = numTmdbId;
   if (tmdbKey && numTmdbId != null && Number.isFinite(numTmdbId)) {
     poster = await tmdbTvPoster(tmdbKey, numTmdbId).catch(() => null);
   }
@@ -282,12 +497,22 @@ async function tmdbSeries(
   id: string,
   inWindow: (date: string) => boolean,
   tmdbKey: string,
+  meta: TitleMeta,
 ): Promise<ResolvedSeries | null> {
-  let tvId: number | null = null;
-  if (id.startsWith("tmdb:tv:")) tvId = Number(id.split(":")[2]);
-  else if (id.startsWith("tt")) tvId = (await tmdbFindByImdb(tmdbKey, id.split(":")[0])).tvId;
-  if (tvId == null || !Number.isFinite(tvId)) return null;
+  const tvId = await seriesTmdbId(id, tmdbKey, meta);
+  if (tvId == null) return null;
   return tmdbTvUpcoming(tmdbKey, tvId, inWindow);
+}
+
+/** Reuses the id saved with the title, so a re-check skips the IMDb lookup. */
+async function seriesTmdbId(id: string, tmdbKey: string, meta: TitleMeta): Promise<number | null> {
+  let tvId: number | null = meta.tmdb;
+  if (tvId == null && id.startsWith("tmdb:tv:")) tvId = Number(id.split(":")[2]);
+  else if (tvId == null && id.startsWith("tt") && tmdbKey)
+    tvId = (await tmdbFindByImdb(tmdbKey, id.split(":")[0])).tvId;
+  if (tvId == null || !Number.isFinite(tvId)) return null;
+  meta.tmdb = tvId;
+  return tvId;
 }
 
 /** Cinemeta writes a finished run as "2008–2013" and an ongoing one as "2019–". */
@@ -387,19 +612,30 @@ async function seriesUpcoming(
   tmdbKey: string,
   year: number,
   month: number,
+  meta: TitleMeta = { ended: false, tmdb: null },
+  background = false,
 ): Promise<ResolvedSeries | null> {
-  if (isAnimeId(c.id)) return animeUpcoming(c.id, inWindow, tmdbKey);
+  if (isAnimeId(c.id)) return animeUpcoming(c.id, inWindow, tmdbKey, meta);
   let cinemetaEnded = false;
   if (c.id.startsWith("tt")) {
     const cm = await cinemetaSeriesUpcoming(c.id, inWindow);
-    if (cm.resolved) return correctCatalogAnimeAirings(c.id, cm.resolved, year, month);
+    if (cm.resolved) {
+      // The TMDB id only serves the change list, so a first load does not wait for it.
+      if (background && tmdbKey) await seriesTmdbId(c.id, tmdbKey, meta).catch(() => null);
+      return correctCatalogAnimeAirings(c.id, cm.resolved, year, month);
+    }
     // A finished run has no upcoming episodes, so TVMaze is skipped. Trade-off: a revived
-    // show whose Cinemeta entry has not been updated stays hidden until Cinemeta catches up.
+    // show whose Cinemeta entry has not been updated stays hidden until its monthly re-check
+    // or, with a TMDB key, until TMDB lists it as changed.
     cinemetaEnded = cm.ended;
+    meta.ended = cm.ended;
   }
   if (tmdbKey) {
-    const t = await tmdbSeries(c.id, inWindow, tmdbKey);
-    if (t) return correctCatalogAnimeAirings(c.id, t, year, month);
+    const t = await tmdbSeries(c.id, inWindow, tmdbKey, meta);
+    if (t) {
+      meta.ended = false;
+      return correctCatalogAnimeAirings(c.id, t, year, month);
+    }
   } else if (c.id.startsWith("tt") && !cinemetaEnded) {
     const up = await tvmazeUpcoming(c.id.split(":")[0], inWindow);
     if (up) {
@@ -431,14 +667,23 @@ async function movieRelease(
   c: Candidate,
   inWindow: (date: string) => boolean,
   tmdbKey: string,
+  meta: TitleMeta = { ended: false, tmdb: null },
 ): Promise<CalendarItem | null> {
   const imdb = c.id.startsWith("tt") ? c.id.split(":")[0] : null;
-  let movieId: number | null = null;
-  if (c.id.startsWith("tmdb:movie:")) movieId = Number(c.id.split(":")[2]);
-  else if (imdb && tmdbKey) movieId = (await tmdbFindByImdb(tmdbKey, imdb)).movieId;
+  let movieId: number | null = meta.tmdb;
+  if (movieId == null && c.id.startsWith("tmdb:movie:")) movieId = Number(c.id.split(":")[2]);
+  else if (movieId == null && imdb && tmdbKey)
+    movieId = (await tmdbFindByImdb(tmdbKey, imdb)).movieId;
+  if (movieId != null && Number.isFinite(movieId)) meta.tmdb = movieId;
+  // A release before the window is final; a missing or later date can still move.
+  const released = (date: string) => {
+    const at = Date.parse(date);
+    meta.ended = Number.isFinite(at) && at < Date.now() - 31 * DAY_MS;
+  };
 
   if (movieId != null && Number.isFinite(movieId) && tmdbKey) {
     const m = await tmdbMovieRelease(tmdbKey, movieId);
+    if (m) released(m.releaseDate);
     if (!m || !inWindow(m.releaseDate)) return null;
     return {
       id: c.id,
@@ -457,6 +702,7 @@ async function movieRelease(
     const m = await cinemetaMeta("movie", imdb);
     if (!m) return null;
     const date = (m.releaseDate ?? "").slice(0, 10);
+    released(date);
     if (!inWindow(date)) return null;
     return {
       id: m.id,
@@ -627,8 +873,17 @@ async function resolveSeriesCached(
 ): Promise<ResolvedSeries | null> {
   // Anime air dates are corrected per month, so the month is part of the key.
   const scope = [tmdbKey, effectiveTmdbLanguage(), c.id, c.name, year, month];
-  return seriesCache.fetch(JSON.stringify(scope), () =>
-    savedTitle("series", scope, () => seriesUpcoming(c, wideWindow(), tmdbKey, year, month)),
+  const key = JSON.stringify(scope);
+  return seriesCache.fetch(key, () =>
+    savedTitle(
+      "series",
+      key,
+      scope,
+      tmdbKey,
+      (meta, background) =>
+        seriesUpcoming(c, wideWindow(), tmdbKey, year, month, meta, background),
+      (value) => seriesCache.set(key, value),
+    ),
   );
 }
 
@@ -637,33 +892,89 @@ async function resolveMovieCached(
   tmdbKey: string,
 ): Promise<CalendarItem | null> {
   const scope = [tmdbKey, effectiveTmdbLanguage(), c.id, c.name];
-  return movieCache.fetch(JSON.stringify(scope), () =>
-    savedTitle("movie", scope, () => movieRelease(c, wideWindow(), tmdbKey)),
+  const key = JSON.stringify(scope);
+  return movieCache.fetch(key, () =>
+    savedTitle(
+      "movie",
+      key,
+      scope,
+      tmdbKey,
+      (meta) => movieRelease(c, wideWindow(), tmdbKey, meta),
+      (value) => movieCache.set(key, value),
+    ),
   );
 }
 
-/** Reads a title resolved in the last 30 days from disk; failures are never saved. */
+/**
+ * Shows a saved title at once and queues a background re-check when it is due. Failures are
+ * never saved. Without an installation salt nothing is written, but re-checks still run.
+ */
 async function savedTitle<T>(
   kind: "series" | "movie",
+  memoryKey: string,
   scope: readonly unknown[],
-  resolve: () => Promise<T>,
+  tmdbKey: string,
+  resolve: (meta: TitleMeta, background: boolean) => Promise<T>,
+  remember: (value: T) => void,
 ): Promise<T> {
   const salt = cacheInstallationSalt();
-  if (!salt) return resolve();
   const namespace = `${TITLE_PREFIX}${kind}`;
-  const key = [salt, ...scope];
+  const diskKey = salt ? [salt, ...scope] : null;
   const epoch = titleEpoch;
-  const saved = await readMediaValue<{ value: T }>(namespace, key).catch(() => null);
-  if (saved && typeof saved === "object" && "value" in saved) return saved.value;
-  const value = await resolve();
-  if (epoch === titleEpoch) {
-    void saveMedia(
-      namespace,
-      key,
-      { value },
-      { ttl: TITLE_DISK_TTL_MS, stale: TITLE_DISK_TTL_MS, maxBytes: 256 * 1024 },
-    ).catch(() => false);
+  let current: T;
+  const track = (value: T, meta: TitleMeta, checkedAt: number) => {
+    current = value;
+    if (epoch !== titleEpoch) return;
+    knownTitles.delete(memoryKey);
+    if (knownTitles.size >= KNOWN_TITLES_MAX) {
+      const oldest = knownTitles.keys().next().value;
+      if (oldest !== undefined) knownTitles.delete(oldest);
+    }
+    knownTitles.set(memoryKey, {
+      kind,
+      tmdb: meta.tmdb,
+      checkedAt,
+      recheck: async () => {
+        const next: TitleMeta = { ended: false, tmdb: meta.tmdb };
+        const value = await resolve(next, true);
+        if (epoch !== titleEpoch) return;
+        const changed = JSON.stringify(value) !== JSON.stringify(current);
+        store(value, next);
+        if (changed) {
+          remember(value);
+          titlesChanged = true;
+        }
+      },
+    });
+  };
+  const store = (value: T, meta: TitleMeta) => {
+    const checkedAt = Date.now();
+    track(value, meta, checkedAt);
+    if (!diskKey || epoch !== titleEpoch) return;
+    const ttl = meta.ended ? ENDED_DISK_TTL_MS : TITLE_DISK_TTL_MS;
+    const entry: SavedTitleEntry<T> = { value, checkedAt, ended: meta.ended, tmdb: meta.tmdb };
+    void saveMedia(namespace, diskKey, entry, {
+      ttl,
+      stale: ttl,
+      maxBytes: 256 * 1024,
+    }).catch(() => false);
+  };
+  scheduleTmdbChanges(tmdbKey);
+  const saved = diskKey
+    ? await readMediaValue<SavedTitleEntry<T>>(namespace, diskKey).catch(() => null)
+    : null;
+  if (saved && typeof saved === "object" && "value" in saved) {
+    const meta: TitleMeta = { ended: saved.ended === true, tmdb: saved.tmdb ?? null };
+    // Entries saved before re-checks existed have no time and are re-checked first.
+    const checkedAt = Number.isFinite(saved.checkedAt) ? (saved.checkedAt as number) : 0;
+    track(saved.value, meta, checkedAt);
+    const due = meta.ended ? ENDED_RECHECK_MS : TITLE_RECHECK_MS;
+    if (Date.now() - checkedAt >= due) queueRecheck(memoryKey, false);
+    return saved.value;
   }
+  const meta: TitleMeta = { ended: false, tmdb: null };
+  const value = await resolve(meta, false);
+  store(value, meta);
   return value;
 }
 

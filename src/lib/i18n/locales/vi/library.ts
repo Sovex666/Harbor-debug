@@ -91,6 +91,7 @@ const library: Record<string, string> = {
   Tabs: "Thẻ",
   "Show tabs": "Hiện thẻ",
   "Choose which tabs appear in your library": "Chọn các thẻ hiển thị trong thư viện của bạn",
+  "Refresh calendar": "Làm mới lịch",
 };
 
 export default library;

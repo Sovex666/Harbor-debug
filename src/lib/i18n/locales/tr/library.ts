@@ -515,6 +515,7 @@ const library: Record<string, string> = {
   Tabs: "Sekmeler",
   "Show tabs": "Sekmeleri göster",
   "Choose which tabs appear in your library": "Kitaplığınızda hangi sekmelerin görüneceğini seçin",
+  "Refresh calendar": "Takvimi yenile",
 };
 
 export default library;

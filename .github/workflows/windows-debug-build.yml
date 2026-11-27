@@ -87,10 +87,27 @@ jobs:
 
       # beforeBuildCommand stages capstan, whose deps.sh fetched this jar from the same gone
       # upstream release; the mirror holds the same file and deps.sh still checks its SHA-256.
+      # Benchmark builds get their own identifier (own app data, WebView2 profile and
+      # single-instance lock) and register no URL schemes, so they never touch the
+      # production app.harbor profile or its deep-link handlers.
+      - name: Bench identity
+        shell: pwsh
+        run: |
+          $suffix = ("${{ github.ref_name }}" -replace '^perf/', '') -replace '[^a-z0-9-]', '-'
+          $conf = [ordered]@{
+            identifier = "app.harbor.$suffix"
+            plugins = @{ 'deep-link' = @{ mobile = @(); desktop = @{ schemes = @() } } }
+          } | ConvertTo-Json -Depth 6
+          $path = Join-Path $env:RUNNER_TEMP 'bench.conf.json'
+          [IO.File]::WriteAllText($path, $conf)
+          Get-Content $path
+          "BENCH_CONF=$path" >> $env:GITHUB_ENV
+          "BENCH_ID=app.harbor.$suffix" >> $env:GITHUB_ENV
+
       - name: Tauri debug build (exe only)
         env:
           HARBOR_NANOJSON_URL: https://github.com/${{ github.repository }}/releases/download/nanojson-e9d656d/nanojson-e9d656d.jar
-        run: pnpm tauri build --debug --no-bundle
+        run: pnpm tauri build --debug --no-bundle --config "$env:BENCH_CONF"
 
       - name: Stage the runnable folder
         shell: pwsh
@@ -103,7 +120,7 @@ jobs:
           foreach ($dir in 'resources', 'fonts', 'notices') {
             if (Test-Path "$src/$dir") { Copy-Item "$src/$dir" -Destination $out -Recurse }
           }
-          "commit $env:GITHUB_SHA`nbuilt $(Get-Date -Format o)" | Set-Content "$out/BUILD-INFO.txt"
+          "commit $env:GITHUB_SHA`nbuilt $(Get-Date -Format o)`nidentifier $env:BENCH_ID" | Set-Content "$out/BUILD-INFO.txt"
           Get-ChildItem $out | Format-Table Name, Length
 
       - name: Upload debug build

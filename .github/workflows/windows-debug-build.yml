@@ -104,6 +104,15 @@ jobs:
           "BENCH_CONF=$path" >> $env:GITHUB_ENV
           "BENCH_ID=app.harbor.$suffix" >> $env:GITHUB_ENV
 
+      # ort-sys (pulled in by asr-whisper on trees that have it) panics on Windows when its
+      # OUT_DIR/../../.. copy destinations are missing; same fix as Initialize-OrtRuntimeDirectories.
+      - name: Prepare ort-sys output directories
+        shell: pwsh
+        run: |
+          foreach ($base in 'src-tauri/target/debug', 'src-tauri/target/debug/build') {
+            foreach ($d in $base, "$base/examples", "$base/deps") { New-Item -ItemType Directory -Force $d | Out-Null }
+          }
+
       - name: Tauri debug build (exe only)
         env:
           HARBOR_NANOJSON_URL: https://github.com/${{ github.repository }}/releases/download/nanojson-e9d656d/nanojson-e9d656d.jar
@@ -117,6 +126,10 @@ jobs:
           New-Item -ItemType Directory -Force $out | Out-Null
           Get-ChildItem $src -File | Where-Object { $_.Extension -in '.exe', '.dll' } |
             Copy-Item -Destination $out
+          if (Test-Path "$src/build") {
+            Get-ChildItem "$src/build" -File -Filter '*.dll' | Where-Object { $_.Name -match '^(?:onnxruntime.*|DirectML)\.dll$' } |
+              Copy-Item -Destination $out -Force
+          }
           foreach ($dir in 'resources', 'fonts', 'notices') {
             if (Test-Path "$src/$dir") { Copy-Item "$src/$dir" -Destination $out -Recurse }
           }

@@ -98,6 +98,8 @@ const SAFE_KEYS = new Set(
   average latest resources resourceCount transferSize encodedBodySize decodedBodySize
   domContentLoadedMs loadMs responseMs uptimeMs
   hasSnapshot high rssMB local insecure fallback
+  navigationId rows resolved complete failed stopped suppressed cache cause event retry
+  underrun gapMs decoder frameDrops idle
 `
     .trim()
     .split(/\s+/),
@@ -107,6 +109,8 @@ const SAFE_EVENT_NAMES = new Set([
   "calendar.library.resolve",
   "calendar.load",
   "calendar.cache",
+  "calendar.library.partial",
+  "calendar:fetch",
   "ui:longtask",
   "ui:event-loop-stall",
   "image:loaded",
@@ -128,6 +132,7 @@ const SAFE_EVENT_NAMES = new Set([
   "playback:buffering",
   "playback:end-file",
   "playback:file-loaded",
+  "playback:loaded",
   "playback:restart",
   "playback:load",
   "playback:timer-gap",

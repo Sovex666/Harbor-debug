@@ -12,12 +12,14 @@ import { useSearchActions } from "@/lib/search-context";
 import { useSettings } from "@/lib/settings";
 import { getThemeById } from "@/lib/theme";
 import { useView } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 import { close, minimize, toggleMaximize } from "@/lib/window";
 
 const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
 export function FloatingTop() {
   const { view, setView, chromeHidden, canGoBack, goBack, topKind, exitPlayback } = useView();
+  const selectView = useInstantNav();
   const { settings } = useSettings();
   const { setOpen: setSearchOpen } = useSearchActions();
   const t = useT();
@@ -43,7 +45,7 @@ export function FloatingTop() {
     >
       <button
         type="button"
-        onClick={() => setView("home")}
+        onClick={(e) => selectView("home", e)}
         className="harbor-minui-mark flex shrink-0 items-center gap-2 rounded-full px-1.5 py-1 text-ink transition-colors"
         aria-label={t("chrome.harborHome")}
       >

@@ -85,6 +85,11 @@ test("root Refresh and the original File menu reload the same window without nav
     "@/lib/i18n": { useT: () => identity },
     "@/lib/settings": { useSettings: () => ({ settings, update: empty }) },
     "@/lib/view": { useView: () => view },
+    "@/chrome/use-instant-nav": {
+      useInstantNav: () => () => {
+        navigations++;
+      },
+    },
     "@/lib/playback-history": {
       capturePlaybackActor: () => "fixture",
       isPlaybackActorCurrent: (actor: string) => actor === "fixture",

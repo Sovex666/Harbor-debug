@@ -22,6 +22,7 @@ import { useSettings } from "@/lib/settings";
 import { getThemeById } from "@/lib/theme";
 import { useParental } from "@/lib/parental";
 import { useView, type View } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 import { close, minimize, toggleMaximize, useMaximized } from "@/lib/window";
 import { OverflowNav, type NavEntry } from "@/chrome/nav-overflow";
 import { useAvailableNavItems, applyNavCustomization, type NavItem } from "@/chrome/nav-items";
@@ -31,6 +32,7 @@ const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in windo
 
 export function RoyalTopbar() {
   const { view, setView, chromeHidden } = useView();
+  const selectView = useInstantNav();
   const { locked, unlock, hiddenTabs } = useParental();
   const { settings } = useSettings();
   const { setOpen: setSearchOpen } = useSearchActions();
@@ -61,11 +63,11 @@ export function RoyalTopbar() {
     return true;
   };
 
-  const navigate = (item: NavItem) => {
+  const navigate = (item: NavItem, e?: React.MouseEvent<HTMLElement>) => {
     const needsPin =
       locked && (item.pinGated || (item.parentalKey && hiddenTabs[item.parentalKey]));
     if (needsPin) setPinFor(item.view);
-    else setView(item.view);
+    else selectView(item.view, e, "royal");
   };
 
   const barItems = items.filter((i) => i.id !== "settings" && i.id !== "kids");
@@ -76,7 +78,7 @@ export function RoyalTopbar() {
       key: item.id,
       label,
       active,
-      onSelect: () => navigate(item),
+      onSelect: (e) => navigate(item, e),
       node: <RoyalNavButton item={item} active={active} label={label} navigate={navigate} />,
     };
   });
@@ -103,7 +105,7 @@ export function RoyalTopbar() {
               type="button"
               tabIndex={-1}
               data-tv-skip="true"
-              onClick={() => setView("home")}
+              onClick={(e) => selectView("home", e)}
               className="flex shrink-0 items-center gap-2.5 text-ink"
               aria-label={t("chrome.harborHome")}
             >
@@ -245,7 +247,7 @@ function RoyalNavButton({
   item: NavItem;
   active: boolean;
   label: string;
-  navigate: (item: NavItem) => void;
+  navigate: (item: NavItem, e?: React.MouseEvent<HTMLElement>) => void;
 }) {
   const { open: openContextMenu } = useContextMenu();
   const editing = useNavEditMode();
@@ -254,7 +256,7 @@ function RoyalNavButton({
     <NavEditableItem itemId={item.id}>
       <button
         type="button"
-        onClick={() => navigate(item)}
+        onClick={(e) => navigate(item, e)}
         onContextMenu={(e) =>
           openContextMenu(e, {
             kind: "nav",

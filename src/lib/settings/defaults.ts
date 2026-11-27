@@ -648,6 +648,7 @@ export const DEFAULT: Settings = {
   publicmetadbScrobbleEnabled: true,
   weekStartsMonday: false,
   calendarPosterSize: "default",
+  calendarPreloadOnStartup: true,
   customCalendar: {
     trackedPeople: [],
     includeTraktWatchlist: false,

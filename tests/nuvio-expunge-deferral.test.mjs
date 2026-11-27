@@ -69,6 +69,11 @@ const createFixture = () => {
       "@/lib/resume": {},
       "./anime-detect": {},
       "@/lib/manual-watched": {},
+      // Cloud library writes fence the cached library projection around the request.
+      "./library-read-cache": {
+        beginLibraryProjectionMutation: () => () => {},
+        invalidateLibraryProjections: async () => {},
+      },
     },
     storageFrom(data),
   );

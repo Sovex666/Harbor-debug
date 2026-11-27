@@ -22,6 +22,7 @@ import { useSettings } from "@/lib/settings";
 import { useT } from "@/lib/i18n";
 import { useParental } from "@/lib/parental";
 import { useView, type View } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 import { ParentalPinModal } from "@/components/parental-pin-modal";
 import { close, minimize, toggleMaximize } from "@/lib/window";
 
@@ -42,6 +43,7 @@ const PRIMARY_IDS = new Set([
 export function SideRail() {
   const editing = useNavEditMode();
   const { view, setView, chromeHidden } = useView();
+  const selectView = useInstantNav();
   const { settings } = useSettings();
   const { locked, unlock, hiddenTabs } = useParental();
   const { setOpen: setSearchOpen } = useSearchActions();
@@ -54,12 +56,12 @@ export function SideRail() {
   const [pinFor, setPinFor] = useState<View | null>(null);
   const collapsed = settings.sidebarCollapsed;
 
-  const navigate = (item: NavItem) => {
+  const navigate = (item: NavItem, e?: React.MouseEvent<HTMLElement>) => {
     if (item.parentalKey && locked && hiddenTabs[item.parentalKey]) {
       setPinFor(item.view);
       return;
     }
-    setView(item.view);
+    selectView(item.view, e, "siderail");
   };
 
   const isVisible = (item: NavItem) =>
@@ -103,7 +105,7 @@ export function SideRail() {
           />
           <button
             type="button"
-            onClick={() => setView("home")}
+            onClick={(e) => selectView("home", e)}
             className="relative flex items-center gap-2 text-accent"
             aria-label={t("chrome.harborHome")}
           >
@@ -132,7 +134,7 @@ export function SideRail() {
                 label={item.label}
                 active={view === item.view}
                 collapsed={collapsed}
-                onClick={() => navigate(item)}
+                onClick={(e) => navigate(item, e)}
               />
             ))}
           </nav>
@@ -149,7 +151,7 @@ export function SideRail() {
                     label={item.label}
                     active={view === item.view}
                     collapsed={collapsed}
-                    onClick={() => navigate(item)}
+                    onClick={(e) => navigate(item, e)}
                   />
                 ))}
               </nav>
@@ -167,7 +169,7 @@ export function SideRail() {
                   label={settingsItem.label}
                   active={view === settingsItem.view}
                   collapsed={collapsed}
-                  onClick={() => setView(settingsItem.view)}
+                  onClick={(e) => selectView(settingsItem.view, e, "siderail")}
                 />
               </nav>
             </>
@@ -276,7 +278,7 @@ function RailItem({
   label: string;
   active: boolean;
   collapsed: boolean;
-  onClick: () => void;
+  onClick: (e?: React.MouseEvent<HTMLButtonElement>) => void;
 }) {
   const t = useT();
   const translated = t(label);

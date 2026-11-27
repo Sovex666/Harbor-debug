@@ -1,10 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { createObjectUrlCache } from "./object-url-cache";
-import { createRequestScheduler } from "./request-scheduler";
+import { isImageLayerParked, onImageLayerResume } from "./image-readiness";
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { suwayomiAuthFor } from "@/lib/manga/sources/suwayomi/auth-registry";
 import { useSettings } from "@/lib/settings";
 import { idbCacheGet, idbCacheDelete, idbCacheKeys } from "@/lib/idb-cache";
+import { measureDiagnostic, recordDiagnostic } from "./perf/diagnostics";
+import { createThumbnailScheduler, type ThumbnailPriority } from "./thumbnail-scheduler";
 
 const isTauri = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 
@@ -81,8 +83,64 @@ function isDead(url: string): boolean {
   deadUrls.delete(url);
   return false;
 }
-const inflight = new Map<string, Promise<ProxyImageResult | null>>();
-const posterDownloads = createRequestScheduler({ concurrency: 6 });
+// A card's own retry must not be answered by the 60s failure memory, or every retry would fail instantly.
+export function forgetFailedImage(url: string): void {
+  for (const key of deadUrls.keys()) if (key.endsWith(`\n${url}`)) deadUrls.delete(key);
+}
+// Every proxied image runs through this scheduler: it bounds concurrent downloads, orders them by
+// priority, and holds work whose App layer is parked until that layer is active again.
+const imageScheduler = createThumbnailScheduler<ProxyImageResult | null>();
+export function deferBackgroundImages(ms = 1500): void {
+  imageScheduler.pauseBackground(ms);
+}
+if (typeof window !== "undefined") {
+  let lastDeferAt = 0;
+  const deferOnInput = () => {
+    const now = Date.now();
+    // Timestamp only: a layout read here would force a reflow on every scroll frame.
+    if (now - lastDeferAt < 200) return;
+    lastDeferAt = now;
+    deferBackgroundImages(600);
+  };
+  for (const type of ["scroll", "wheel", "pointerdown"]) {
+    window.addEventListener(type, deferOnInput, { passive: true, capture: true });
+  }
+  window.addEventListener("harbor:reset-row-scrolls", () => deferBackgroundImages(1500));
+  // Jobs held in a parked layer resume through one queue scan, off the switch commit's task.
+  let pumpQueued = false;
+  onImageLayerResume(() => {
+    if (pumpQueued) return;
+    pumpQueued = true;
+    setTimeout(() => {
+      pumpQueued = false;
+      imageScheduler.pump();
+    }, 0);
+  });
+}
+export function clearSpeculativeArtwork(): void {
+  imageScheduler.clearSpeculative();
+}
+// Parked (warmed) views are hidden, so their posters would otherwise be paused and never load.
+let artworkWarmUntil = 0;
+export function warmParkedArtwork(ms: number): void {
+  artworkWarmUntil = Date.now() + ms;
+  // Warm-eligible jobs held in parked layers can start now.
+  imageScheduler.pump();
+}
+export function endParkedArtworkWarm(): void {
+  artworkWarmUntil = 0;
+}
+export function isParkedArtworkWarm(): boolean {
+  return Date.now() < artworkWarmUntil;
+}
+export function releaseUnusedArtworkMemory(): void {
+  // A delayed release must not discard warm poster loads while the after-player window is open.
+  if (!isParkedArtworkWarm()) imageScheduler.clearSpeculative();
+  blobCache.releaseUnused();
+}
+export function artworkDiagnostics() {
+  return { ...blobCache.stats(), ...imageScheduler.stats() };
+}
 // Legacy poster blobs share a database with pinned music; only this prefix is disposable.
 const POSTER_PREFIX = "season-poster:v1:";
 const POSTER_TTL = 7 * 24 * 60 * 60_000;
@@ -119,7 +177,6 @@ function getLegacyPosterKeys(): Promise<Set<string>> {
 export async function clearThumbCache(): Promise<void> {
   cacheGeneration++;
   blobCache.clear();
-  inflight.clear();
   deadUrls.clear();
   answeredFiles.clear();
   const keys = await getLegacyPosterKeys();
@@ -140,19 +197,47 @@ export async function getThumbCacheSize(): Promise<ThumbCacheSize | null> {
   }
 }
 
+// Shared by cards that ask for the same image at once. It bypasses the network scheduler, so a
+// disk hit never waits behind slow downloads.
+const diskLookups = new Map<string, Promise<string | null>>();
+function lookupDisk(url: string, thumbWidthPx?: number): Promise<string | null> {
+  const key = `${thumbWidthPx ?? 0}\n${url}`;
+  const pending = diskLookups.get(key);
+  if (pending) return pending;
+  const lookup = measureDiagnostic("image:disk-lookup");
+  const found = invoke<string | null>("cached_thumb_path", { url, width: thumbWidthPx ?? 0 })
+    .catch(() => null)
+    .then((path) => {
+      lookup("ok", { hit: typeof path === "string" && !!path });
+      return typeof path === "string" && path ? path : null;
+    })
+    .finally(() => {
+      diskLookups.delete(key);
+    });
+  diskLookups.set(key, found);
+  return found;
+}
+
 function proxyImage(
   url: string,
   thumbWidthPx?: number,
   persistent = false,
   migrateLegacy = true,
+  signal?: AbortSignal,
+  diskChecked = false,
 ): Promise<ProxyImageResult | null> {
   const generation = cacheGeneration;
   const key = cacheKeyFor(url, thumbWidthPx);
   const cached = blobCache.get(key);
-  if (cached) return Promise.resolve(cached);
-  if (isDead(key)) return Promise.resolve(null);
-  const existing = inflight.get(key);
-  if (existing) return existing;
+  if (cached) {
+    recordDiagnostic("image:memory-hit");
+    return Promise.resolve(cached);
+  }
+  if (isDead(key)) {
+    recordDiagnostic("image:failure-cached");
+    return Promise.resolve(null);
+  }
+  const finish = measureDiagnostic("image:proxy", { persistent });
   const p = (async () => {
     let phase = "cache";
     let responseStatus: number | undefined;
@@ -161,15 +246,12 @@ function proxyImage(
       const siteReferer = sourceImageReferer(url);
       const diskKey = `${POSTER_PREFIX}${thumbWidthPx ?? 0}\n${url}`;
       const persist = persistent && !auth;
-      if (persist) {
+      if (persist && !diskChecked) {
         // A fresh native entry can be served straight through the asset
         // protocol; this avoids the base64 IPC + Blob path on warm posters.
-        const path = await invoke<string | null>("cached_thumb_path", {
-          url,
-          width: thumbWidthPx ?? 0,
-        }).catch(() => null);
+        const path = await lookupDisk(url, thumbWidthPx);
         if (generation !== cacheGeneration) return null;
-        if (typeof path === "string" && path) return convertFileSrc(path);
+        if (path) return convertFileSrc(path);
       }
       if (persist && migrateLegacy) {
         const legacyKeys = await getLegacyPosterKeys();
@@ -184,51 +266,63 @@ function proxyImage(
           void idbCacheDelete(diskKey).catch(() => {});
         }
       }
-      const requestCover = (useCache: boolean, acceptImage: boolean) =>
-        invoke<HarborFetchResponse>("harbor_fetch", {
-          args: {
-            url,
-            method: "GET",
-            responseType: "base64",
-            returnImageAsset: useCache,
-            timeoutMs: 30000,
-            headers: auth
-              ? { authorization: auth }
-              : siteReferer || acceptImage
-                ? {
-                    ...(siteReferer ? { Referer: siteReferer } : {}),
-                    ...(acceptImage ? { Accept: "image/*" } : {}),
-                  }
-                : undefined,
-            allowLocalNetwork: Boolean(auth),
-            thumbWidthPx,
-            cacheImage: useCache,
-            maxResponseBytes: 32 * 1024 * 1024,
-          },
-        });
-      const fetchCover = (useCache: boolean, acceptImage = false) => {
-        if (!persist) return requestCover(useCache, acceptImage);
-        return posterDownloads.schedule(`${generation}:${key}`, () =>
-          generation === cacheGeneration
-            ? requestCover(useCache, acceptImage)
-            : Promise.reject(new Error("image cache cleared")),
-        );
+      const requestCover = async (useCache: boolean, acceptImage: boolean) => {
+        if (generation !== cacheGeneration) throw new Error("image cache cleared");
+        signal?.throwIfAborted();
+        const request = measureDiagnostic("image:fetch");
+        const requestId = crypto.randomUUID();
+        const cancel = () => {
+          void invoke("harbor_image_cancel", { requestId }).catch(() => {});
+        };
+        signal?.addEventListener("abort", cancel, { once: true });
+        try {
+          const response = await invoke<HarborFetchResponse>("harbor_image_fetch", {
+            requestId,
+            args: {
+              url,
+              method: "GET",
+              responseType: "base64",
+              returnImageAsset: useCache,
+              timeoutMs: 30000,
+              headers: auth
+                ? { authorization: auth }
+                : siteReferer || acceptImage
+                  ? {
+                      ...(siteReferer ? { Referer: siteReferer } : {}),
+                      ...(acceptImage ? { Accept: "image/*" } : {}),
+                    }
+                  : undefined,
+              allowLocalNetwork: Boolean(auth),
+              thumbWidthPx,
+              cacheImage: useCache,
+              maxResponseBytes: 32 * 1024 * 1024,
+            },
+          });
+          request(response.ok ? "ok" : "error", { status: response.status });
+          return response;
+        } catch (error) {
+          request("error");
+          throw error;
+        } finally {
+          signal?.removeEventListener("abort", cancel);
+        }
       };
       let resp: HarborFetchResponse;
       phase = "native-fetch";
       try {
-        resp = await fetchCover(persist);
+        resp = await requestCover(persist, false);
       } catch (error) {
         // A thumbnail cache error should not hide an otherwise reachable cover.
         // Retry just once without persistent caching or conditional headers.
-        if (auth || !persist) throw error;
-        resp = await fetchCover(false, true);
+        if (auth || !persist || signal?.aborted) throw error;
+        resp = await requestCover(false, true);
       }
       if (!resp.ok && persist && !auth && resp.status !== 403 && resp.status !== 429) {
         // Some image CDNs reject conditional cache requests (400) even though
         // the original cover can be fetched normally.
-        resp = await fetchCover(false, true);
+        resp = await requestCover(false, true);
       }
+      signal?.throwIfAborted();
       responseStatus = resp.status;
       if (!resp.ok) throw new Error("status " + resp.status);
       if (generation !== cacheGeneration) return null;
@@ -241,9 +335,11 @@ function proxyImage(
       if (type && !type.startsWith("image/")) throw new Error(`type ${type}`);
       if (resp.assetPath) return convertFileSrc(resp.assetPath);
       phase = "base64-decode";
+      const decode = measureDiagnostic("image:base64-decode");
       const bytes = base64ToBytes(resp.body);
       phase = "blob";
       const blob = new Blob([bytes], { type });
+      decode("ok", { bytes: blob.size });
       const control = resp.headers?.["cache-control"] ?? "";
       const age =
         resp.headers?.["x-harbor-image-max-age"] ?? /(?:^|,)\s*max-age="?(\d+)/i.exec(control)?.[1];
@@ -255,7 +351,8 @@ function proxyImage(
       const created = blobCache.set(key, blob, Number.isFinite(ttl) ? ttl : undefined);
       return created;
     } catch (error) {
-      if (generation !== cacheGeneration) return null;
+      finish("error");
+      if (generation !== cacheGeneration || signal?.aborted) return null;
       // Avoid exposing signed cover paths or query parameters in diagnostics.
       let host = "unknown";
       try {
@@ -289,9 +386,8 @@ function proxyImage(
       return null;
     }
   })().finally(() => {
-    if (inflight.get(key) === p) inflight.delete(key);
+    finish(generation === cacheGeneration ? "ok" : "cancelled");
   });
-  inflight.set(key, p);
   return p;
 }
 
@@ -306,6 +402,16 @@ export function useProxiedImageSrc(
     enabled?: boolean;
     originalSize?: boolean;
     thumbWidthPx?: number;
+    priority?: ThumbnailPriority;
+    paused?: boolean;
+    /**
+     * The element whose App layer gates new work: while that layer is parked, a fetch waits in the
+     * queue instead of starting, and resumes when the layer becomes active. Read from the DOM at
+     * scheduling time, so a layer switch never re-renders the caller.
+     */
+    layerRef?: RefObject<Element | null>;
+    /** Let parked work run while `warmParkedArtwork` is in effect. */
+    warmWhileParked?: boolean;
   },
 ): string | undefined {
   const need =
@@ -329,6 +435,14 @@ export function useProxiedImageSrc(
   const [failed, setFailed] = useState(() =>
     url && need && isDead(imageKey) ? imageKey : undefined,
   );
+  const leaseRef = useRef<{ setPriority: (priority: ThumbnailPriority) => void } | undefined>(
+    undefined,
+  );
+  // The disk lookup is async, so a lease taken after it reads the priority at that moment.
+  const priorityRef = useRef<ThumbnailPriority>("visible");
+  priorityRef.current = opts?.priority ?? "visible";
+  const layerRef = opts?.layerRef;
+  const warmWhileParked = opts?.warmWhileParked === true;
   useEffect(() => {
     if (!url || !need || opts?.enabled === false) {
       setFailed(undefined);
@@ -345,33 +459,99 @@ export function useProxiedImageSrc(
       );
       return blobCache.retain(cached);
     }
+    if (opts?.paused) return;
     if (isDead(imageKey)) {
       setBlob(undefined);
       setFailed(imageKey);
       return;
     }
     setFailed(undefined);
-    setBlob(undefined);
     let alive = true;
     const generation = cacheGeneration;
     let release: (() => void) | undefined;
-    void proxyImage(url, thumbWidthPx, persistent, migrateLegacy).then((created) => {
-      if (!alive || generation !== cacheGeneration) return;
-      if (typeof created === "string") {
-        rememberAnsweredFile(imageKey, created);
-        setBlob({ key: imageKey, src: created });
-        return;
-      }
-      if (created && !created.retired) {
-        release = blobCache.retain(created);
-        setBlob({ key: imageKey, src: created.src });
-      } else setFailed(imageKey);
-    });
+    let lease: ReturnType<typeof imageScheduler.acquire> | undefined;
+    let queueTime: ReturnType<typeof measureDiagnostic> | undefined;
+    const hold = layerRef
+      ? () => isImageLayerParked(layerRef.current) && !(warmWhileParked && isParkedArtworkWarm())
+      : undefined;
+    const heldNow = hold?.() ?? false;
+    const startFetch = (diskChecked: boolean) => {
+      // Keep the bitmap already showing this key, so a re-fetch does not blank the card.
+      setBlob((previous) => (previous?.key === imageKey ? previous : undefined));
+      const stats = imageScheduler.stats();
+      // Only a real lease is measured; a disk hit never reaches this point. Time spent parked is
+      // not queue time, so a lease that starts parked is not measured either.
+      queueTime = heldNow
+        ? undefined
+        : measureDiagnostic("image:queue", {
+            active: stats.active,
+            pending: stats.queued,
+          });
+      const acquired = imageScheduler.acquire(
+        imageKey,
+        priorityRef.current,
+        (signal) => {
+          queueTime?.("ok");
+          return proxyImage(url, thumbWidthPx, persistent, migrateLegacy, signal, diskChecked);
+        },
+        hold,
+      );
+      lease = acquired;
+      leaseRef.current = acquired;
+      void acquired.promise
+        .then((created) => {
+          if (!alive || generation !== cacheGeneration) return;
+          if (typeof created === "string") {
+            rememberAnsweredFile(imageKey, created);
+            setBlob({ key: imageKey, src: created });
+            return;
+          }
+          if (created && !created.retired) {
+            release = blobCache.retain(created);
+            setBlob({ key: imageKey, src: created.src });
+          } else setFailed(imageKey);
+        })
+        .catch(() => {
+          if (alive) setFailed(imageKey);
+        });
+    };
+    // Background cards skip this direct lookup. Hundreds of IPC calls at once queue behind visible
+    // work on the native side, so their proxyImage call looks up inside a scheduler slot instead.
+    // Parked cards do the same, so a parked page issues no IPC until its layer is active again.
+    if (persistent && !suwayomiAuthFor(url) && priorityRef.current !== "background" && !heldNow) {
+      void lookupDisk(url, thumbWidthPx).then((path) => {
+        if (!alive || generation !== cacheGeneration) return;
+        if (path) {
+          const src = convertFileSrc(path);
+          rememberAnsweredFile(imageKey, src);
+          setBlob({ key: imageKey, src });
+          return;
+        }
+        startFetch(true);
+      });
+    } else startFetch(false);
     return () => {
       alive = false;
+      queueTime?.("cancelled");
+      if (lease && leaseRef.current === lease) leaseRef.current = undefined;
+      lease?.release();
       release?.();
     };
-  }, [url, imageKey, need, thumbWidthPx, persistent, opts?.enabled, migrateLegacy]);
+  }, [
+    url,
+    imageKey,
+    need,
+    thumbWidthPx,
+    persistent,
+    opts?.enabled,
+    migrateLegacy,
+    opts?.paused,
+    layerRef,
+    warmWhileParked,
+  ]);
+  useEffect(() => {
+    leaseRef.current?.setPriority(opts?.priority ?? "visible");
+  }, [imageKey, opts?.priority]);
   if (opts?.enabled === false) return undefined;
   if (!need) return url;
   // Loading -> undefined (caller shows its placeholder/shimmer). Failed -> the

@@ -45,6 +45,7 @@ function fixture(initial: any[]) {
     compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS },
   }).outputText;
   const scope = {
+    beginDiagnosticNavigation() {},
     stackRef,
     forwardStackRef,
     scrollMem,
@@ -61,6 +62,8 @@ function fixture(initial: any[]) {
       forwardStackRef.current = value;
     },
     setHomeResetTick: () => {},
+    pendingRowResetRef: { current: null as string | null },
+    setRowResetRequest: () => {},
     window: { dispatchEvent() {}, requestAnimationFrame() {}, setTimeout() {} },
     CustomEvent: class {
       constructor(_name: string, _options: unknown) {}

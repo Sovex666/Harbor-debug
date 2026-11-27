@@ -7,7 +7,7 @@ export type NavEntry = {
   node: React.ReactNode;
   label: string;
   active: boolean;
-  onSelect: () => void;
+  onSelect: (e?: React.MouseEvent<HTMLButtonElement>) => void;
 };
 
 export function OverflowNav({
@@ -136,8 +136,8 @@ function MoreMenu({ entries, buttonClassName }: { entries: NavEntry[]; buttonCla
               type="button"
               data-harbor-nav={e.key}
               aria-current={e.active ? "page" : undefined}
-              onClick={() => {
-                e.onSelect();
+              onClick={(ev) => {
+                e.onSelect(ev);
                 setOpen(false);
               }}
               className={`flex h-9 items-center rounded-lg px-3 text-start text-[13px] font-medium transition-colors hover:bg-raised ${

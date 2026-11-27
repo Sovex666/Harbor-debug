@@ -6,7 +6,8 @@ import * as React from "react";
 import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { createObjectUrlCache } from "../src/lib/object-url-cache.ts";
-import { createRequestScheduler } from "../src/lib/request-scheduler.ts";
+import * as diagnostics from "../src/lib/perf/diagnostics.ts";
+import { createThumbnailScheduler } from "../src/lib/thumbnail-scheduler.ts";
 
 test("changing credentials at the same image URL fetches a replacement and releases the old lease", async () => {
   const dom = new JSDOM("<div id='app'></div>", { url: "http://localhost/" });
@@ -23,7 +24,9 @@ test("changing credentials at the same image URL fetches a replacement and relea
   const dependencies = {
     react: React,
     "./object-url-cache": { createObjectUrlCache: () => pool },
-    "./request-scheduler": { createRequestScheduler },
+    "./perf/diagnostics": diagnostics,
+    "./thumbnail-scheduler": { createThumbnailScheduler },
+    "./image-readiness": { isImageLayerParked: () => false, onImageLayerResume: () => () => {} },
     "@tauri-apps/api/core": {
       invoke: async (_command, { args }) => {
         calls.push(args.headers.authorization);

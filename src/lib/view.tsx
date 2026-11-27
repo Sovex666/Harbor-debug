@@ -38,6 +38,12 @@ import { useSectionBackActive } from "./section-back";
 import type { SubtitleLoadMetadata } from "./subtitles/types";
 import type { SourceFolder } from "./custom-sources";
 import { pickerExitStack, samePickerRequest } from "./picker-return";
+import {
+  beginDiagnosticNavigation,
+  commitDiagnosticNavigation,
+  recordDiagnostic,
+  registerDiagnosticNavigator,
+} from "./perf/diagnostics";
 
 export type View =
   | "home"
@@ -602,6 +608,18 @@ export function ViewProvider({ children }: { children: ReactNode }) {
   const bigPictureActive = useBigPicture().active;
   const sectionBackActive = useSectionBackActive();
   const [homeResetTick, setHomeResetTick] = useState(0);
+  // Row-scroll reset requested by setView, dispatched only once the switch has committed.
+  // Dispatching it before the commit let rows write scrollLeft while their page was still parked
+  // (content-visibility:hidden), forcing layout of the whole locked page. Layout effects run after
+  // every DOM mutation of the commit, so by then App has un-parked the destination layer.
+  const pendingRowResetRef = useRef<string | null>(null);
+  const [rowResetRequest, setRowResetRequest] = useState(0);
+  useLayoutEffect(() => {
+    const prefix = pendingRowResetRef.current;
+    if (prefix === null) return;
+    pendingRowResetRef.current = null;
+    window.dispatchEvent(new CustomEvent("harbor:reset-row-scrolls", { detail: { prefix } }));
+  }, [rowResetRequest]);
   const scrollMem = useRef<Map<string, ScrollSnapshot>>(new Map());
   const rowScrollMem = useRef<Map<string, number>>(new Map());
   const scrollSavers = useRef(new Set<() => void>());
@@ -881,19 +899,34 @@ export function ViewProvider({ children }: { children: ReactNode }) {
 
   const setView = useCallback(
     (v: View) => {
+      const startedAt = performance.now();
+      beginDiagnosticNavigation(v);
       if (typeof window !== "undefined") {
         window.__harborProfiler?.recordNav(`view:${v}`);
       }
       if (v === "home") setHomeResetTick((n) => n + 1);
       if (typeof window !== "undefined" && v !== "settings") {
-        window.dispatchEvent(
-          new CustomEvent("harbor:reset-row-scrolls", { detail: { prefix: `${v}:` } }),
-        );
+        // Dispatched by the layout effect above, after this switch commits.
+        pendingRowResetRef.current = `${v}:`;
+        setRowResetRequest((n) => n + 1);
+        // No synchronous fire here: this runs inside the click, before React commits, while the
+        // destination layer is still content-visibility:hidden. The scroll listener would force a
+        // layout of the whole hidden feed. rAF runs after the commit and before paint.
         const fireScrollTop = () =>
           window.dispatchEvent(new CustomEvent("harbor:scroll-top", { detail: { view: v } }));
-        fireScrollTop();
         window.requestAnimationFrame(fireScrollTop);
         window.setTimeout(fireScrollTop, 60);
+      }
+      if (typeof window !== "undefined") {
+        // Timed after the frame that shows the click, not at the end of this handler.
+        // The view is in the event name because diagnostic fields only accept numbers and booleans.
+        window.requestAnimationFrame(() => {
+          window.setTimeout(() => {
+            recordDiagnostic(`navigation:${v}:first-paint`, {
+              elapsedMs: performance.now() - startedAt,
+            });
+          }, 0);
+        });
       }
       setNavStack((s) => {
         const t = s[s.length - 1];
@@ -1573,6 +1606,9 @@ export function ViewProvider({ children }: { children: ReactNode }) {
 
   const topPath = useMemo(() => syncFrameKey(top), [top]);
 
+  useEffect(() => registerDiagnosticNavigator((target) => setView(target as View)), [setView]);
+  useEffect(() => commitDiagnosticNavigation(view), [view, stack]);
+
   const stackKinds = useMemo(() => stack.map((f) => f.kind), [stack]);
 
   const value = useMemo(
@@ -1862,6 +1898,7 @@ export function useScrollMemory(
     const el = ref.current;
     if (!el || !active) return;
 
+    const startedAt = performance.now();
     const initialSnap = recallScroll(key);
     const startsAtTop = initialSnap?.fallback === 0 && !initialSnap.anchor;
     // A fresh page or a saved top position needs no layout read during the commit.
@@ -2092,6 +2129,11 @@ export function useScrollMemory(
       armSettle();
       if (wantsHide && !following) revealId = window.setTimeout(reveal, 220);
       if (!startsAtTop) tryRestore(false, initialHeight, following ? undefined : initialTarget);
+    }
+
+    const elapsedMs = performance.now() - startedAt;
+    if (elapsedMs >= 8) {
+      recordDiagnostic("navigation:scroll-memory", { elapsedMs, hasSnapshot: !!initialSnap });
     }
 
     el.addEventListener("scroll", onScroll, { passive: true });

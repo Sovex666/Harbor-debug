@@ -59,7 +59,12 @@ function notifyThumbnail(bucket: number): void {
 }
 
 export function thumbCacheGet(bucket: number): string | undefined {
-  return thumbCache.get(bucket);
+  const value = thumbCache.get(bucket);
+  if (value !== undefined) {
+    thumbCache.delete(bucket);
+    thumbCache.set(bucket, value);
+  }
+  return value;
 }
 
 export function thumbCacheReceivedAt(bucket: number): number | undefined {

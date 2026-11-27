@@ -7,6 +7,8 @@ import { createRoot } from "react-dom/client";
 import { JSDOM } from "jsdom";
 import { createObjectUrlCache } from "../src/lib/object-url-cache.ts";
 import { createRequestScheduler } from "../src/lib/request-scheduler.ts";
+import { createThumbnailScheduler } from "../src/lib/thumbnail-scheduler.ts";
+import * as readiness from "../src/lib/image-readiness.ts";
 
 async function withCoverProxy(
   responses,
@@ -29,10 +31,15 @@ async function withCoverProxy(
     react: React,
     "./object-url-cache": { createObjectUrlCache: () => pool },
     "./request-scheduler": { createRequestScheduler },
+    "./thumbnail-scheduler": { createThumbnailScheduler },
+    "./image-readiness": readiness,
+    "./perf/diagnostics": { measureDiagnostic: () => () => {}, recordDiagnostic() {} },
     "@tauri-apps/api/core": {
       invoke: async (name, { args }) => {
         if (name === "cached_thumb_path") return null;
-        assert.equal(name, "harbor_fetch");
+        if (name === "harbor_image_cancel") return null;
+        // Images go through the cancellable image queue, which forwards to harbor_fetch.
+        assert.equal(name, "harbor_image_fetch");
         calls.push(args);
         const result = responses.shift();
         if (result instanceof Error) throw result;

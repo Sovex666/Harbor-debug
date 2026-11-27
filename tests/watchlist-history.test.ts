@@ -47,6 +47,10 @@ function fixture(initial: LibraryItem | null) {
   let failedRead = false;
   const writes: LibraryItem[] = [];
   const api = load("src/lib/stremio.ts", {
+    "./library-read-cache": {
+      beginLibraryProjectionMutation: () => () => {},
+      invalidateLibraryProjections: async () => {},
+    },
     "@/lib/safe-fetch": {
       safeFetch: async (url: string, options: { body: string }) => {
         const body = JSON.parse(options.body);

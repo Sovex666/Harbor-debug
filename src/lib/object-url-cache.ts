@@ -59,6 +59,9 @@ export function createObjectUrlCache(limit = 64 * 1024 * 1024, maxEntries = 512)
     clear() {
       for (const [key, entry] of entries) remove(key, entry);
     },
+    releaseUnused() {
+      for (const [key, entry] of entries) if (!entry.refs) remove(key, entry);
+    },
     stats: () => ({ bytes, entries: entries.size }),
   };
 }

@@ -5,6 +5,8 @@ import { readFileSync } from "node:fs";
 // @ts-expect-error Node test types are intentionally outside the browser-only tsconfig.
 import test from "node:test";
 import ts from "typescript";
+import { CalendarCache } from "../src/lib/calendar-cache.ts";
+import { mapCalendarLimit } from "../src/lib/calendar-scheduler.ts";
 import { localDateTimeFromIso } from "../src/lib/calendar-time.ts";
 
 type CalendarRow = {
@@ -23,7 +25,7 @@ type Api = {
     opts: {
       tmdbKey: string;
       includeTrakt: boolean;
-      onProgress?: (items: CalendarRow[]) => void;
+      onSnapshot?: (items: CalendarRow[]) => void;
     },
   ) => Promise<CalendarRow[]>;
   resolveSavedCalendar: (
@@ -36,7 +38,7 @@ type Api = {
     }>,
     year: number,
     month: number,
-    opts: { tmdbKey: string; onProgress?: (items: CalendarRow[]) => void },
+    opts: { tmdbKey: string; onSnapshot?: (items: CalendarRow[]) => void },
   ) => Promise<CalendarRow[]>;
 };
 
@@ -46,6 +48,17 @@ function load(overrides: Record<string, unknown> = {}): Api {
     { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } },
   ).outputText;
   const mocks: Record<string, unknown> = {
+    "./calendar-scheduler": { mapCalendarLimit },
+    "./calendar-cache": { CalendarCache },
+    "./calendar-cache-scope": { calendarScopeKey: () => "scope", registerCalendarCache: () => {} },
+    // No installation salt: titles skip the disk cache in these tests.
+    "./cache-scope": { cacheInstallationSalt: () => "" },
+    "./media-cache": {
+      readMediaValue: async () => null,
+      removeMediaNamespaces: async () => {},
+      saveMedia: async () => false,
+    },
+    "@/lib/perf/diagnostics": { measureDiagnostic: () => () => {} },
     "./cinemeta": { meta: async () => null },
     "./stremio": { library: async () => [] },
     "./watchlist": { readLocalEntries: () => [] },
@@ -53,6 +66,7 @@ function load(overrides: Record<string, unknown> = {}): Api {
     "./manual-watched": { manualWatchedLibraryItems: () => [] },
     "./trakt/watchlist": { fetchWatchlist: async () => [] },
     "./providers/tvmaze": { tvmazeUpcoming: async () => null },
+    "./providers/tmdb/tmdb-client": { effectiveTmdbLanguage: () => "en-US" },
     "./providers/tmdb/tmdb-calendar": {
       tmdbFindByImdb: async () => ({ tvId: null, movieId: null }),
       tmdbMovieRelease: async () => null,
@@ -101,6 +115,22 @@ const TOUGEN_S2 = {
     "2": { episode: "2", airdate: monthDay(2) },
   },
 };
+
+test("a failed Trakt watchlist rejects the library month even with local candidates", async () => {
+  const api = load({
+    "./local-cw": { listLocalCw: () => [{ id: "tt1", type: "movie", name: "Film" }] },
+    "./trakt/watchlist": {
+      fetchWatchlist: async (strict: boolean) => {
+        assert.equal(strict, true);
+        throw new Error("offline");
+      },
+    },
+  });
+  await assert.rejects(
+    api.fetchLibraryCalendar("key", 2026, 9, { tmdbKey: "", includeTrakt: true }),
+    /library/,
+  );
+});
 
 test("a locally started anime reaches the library calendar without a Stremio entry", async () => {
   const api = load({
@@ -267,7 +297,7 @@ test("a catalog row in the same franchise as an anime row is dropped", async () 
   assert.match(out[0].name, /S17E49/);
 });
 
-test("duplicate detection skips movies and resolves catalog series roots concurrently", async () => {
+test("duplicate detection skips movies and catalog series with nothing airing this month", async () => {
   let active = 0;
   let maxActive = 0;
   let imdbAnimeLookups = 0;
@@ -306,12 +336,10 @@ test("duplicate detection skips movies and resolves catalog series roots concurr
 
   await api.fetchLibraryCalendar("key", 2026, 9, { tmdbKey: "", includeTrakt: false });
   assert.equal(imdbAnimeLookups, 0, "movies must not enter anime-root duplicate resolution");
-  assert.deepEqual(
-    tvLookups.sort((a, b) => a - b),
-    [100, 101, 102, 103, 104, 105, 106],
-  );
-  assert.ok(maxActive > 1, "catalog series roots should resolve concurrently");
-  assert.ok(maxActive <= 6, "root lookup concurrency should stay bounded");
+  // Only titles that render this month can duplicate an anime row, so the
+  // franchise lookup is skipped for every catalog series without an episode.
+  assert.deepEqual(tvLookups, []);
+  assert.equal(maxActive, 0);
 });
 
 test("series and movie enrichment start in parallel", async () => {
@@ -411,7 +439,7 @@ test("library resolution publishes partial rows before the slowest batch finishe
       CURRENT_MONTH,
       {
         tmdbKey: "",
-        onProgress: (rows) => {
+        onSnapshot: (rows) => {
           if (rows.length > 0) progressResolve(rows);
         },
       },

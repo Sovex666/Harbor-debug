@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { mergeLoadedHomeRows } from "../src/views/home/merge-loaded-rows";
+import { replaceCatalogFirstPage } from "../src/lib/catalog-page-refresh";
 import type { HomeRow } from "../src/views/home/home-types";
 
 const fetcher = async () => [];
@@ -47,4 +48,30 @@ test("removed rows stay removed and unpaged sources do not retain stale cards", 
   assert.deepEqual(mergeLoadedHomeRows([loaded], []), []);
   const unpaged = { ...firstPage, fetcher: undefined };
   assert.equal(mergeLoadedHomeRows([{ ...loaded, fetcher: undefined }], [unpaged])[0], unpaged);
+});
+
+test("a background first-page refresh survives the late addon stage with loaded tails", () => {
+  const paginated = { ...loaded, firstPageLength: firstPage.metas.length };
+  const nextFirst = [{ id: "movie:new", type: "movie", name: "New movie" }];
+  const refreshed = replaceCatalogFirstPage(paginated, nextFirst);
+  const staged = mergeLoadedHomeRows([refreshed], [firstPage])[0];
+  assert.deepEqual(
+    staged.metas.map((meta) => meta.id),
+    ["movie:new", "movie:6"],
+  );
+  assert.equal(staged.firstPageLength, 1);
+  assert.equal(staged.page, 2);
+  assert.equal(staged.hasMore, false);
+  const again = replaceCatalogFirstPage(staged, [{ ...nextFirst[0], id: "movie:newer" }]);
+  assert.deepEqual(
+    again.metas.map((meta) => meta.id),
+    ["movie:newer", "movie:6"],
+  );
+});
+
+test("a late addon stage cannot revert a refreshed first page before pagination", () => {
+  const refreshed = { ...firstPage, browseRevision: 2, metas: [loaded.metas[6]] };
+  const staged = mergeLoadedHomeRows([refreshed], [firstPage])[0];
+  assert.deepEqual(staged.metas, refreshed.metas);
+  assert.equal(staged.browseRevision, 2);
 });

@@ -18,6 +18,7 @@ import { clearAllLocalCw } from "./local-cw";
 import { clearAllResumeForProfile } from "./resume";
 import { clearCwCache } from "./continue-watching";
 import { clearWatchlistCache } from "./watchlist";
+import { fenceLibraryProjections, invalidateLibraryProjections } from "./library-read-cache";
 
 type Session = { authKey: string; user: User };
 type AuthValue = {
@@ -236,6 +237,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       if (prevSession?.user?._id && prevSession.user._id !== fresh.user._id) {
         purgeStremioAccountData(activeProfile?.id ?? "default");
       }
+      fenceLibraryProjections();
       if (!activeProfile) {
         setSession(fresh);
         return;
@@ -268,6 +270,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   );
 
   const signOut = useCallback(() => {
+    void invalidateLibraryProjections();
     if (isNuvioProviderActive()) {
       clearPrimaryStremioSession();
       setSession(null);

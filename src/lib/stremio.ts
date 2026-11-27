@@ -5,6 +5,7 @@ import { isNuvioProviderActive } from "@/lib/active-profile-id";
 import { collectAllNuvioItemIds } from "@/lib/nuvio/nuvio-client";
 import { sanitizeStremioLocalCw } from "@/lib/local-cw";
 import { manualWatchedState } from "@/lib/manual-watched";
+import { beginLibraryProjectionMutation, invalidateLibraryProjections } from "./library-read-cache";
 
 const API = "https://api.strem.io/api";
 
@@ -312,7 +313,39 @@ export function getUser(authKey: string) {
 }
 
 export function logout(authKey: string) {
+  void invalidateLibraryProjections(authKey);
   return call<unknown>("logout", { authKey });
+}
+
+/** Used only by the browse/Calendar projection; sync reads remain authoritative. */
+export async function libraryProjectionMetadata(authKey: string): Promise<Array<[string, string]>> {
+  const ids = await call<Array<[string, string]>>("datastoreMeta", {
+    authKey,
+    collection: "libraryItem",
+  });
+  if (
+    !Array.isArray(ids) ||
+    ids.some(
+      (row) => !Array.isArray(row) || typeof row[0] !== "string" || typeof row[1] !== "string",
+    )
+  )
+    throw new Error("Invalid library metadata");
+  return ids;
+}
+
+export async function libraryProjectionItems(
+  authKey: string,
+  ids: Array<[string, string]>,
+): Promise<LibraryItem[]> {
+  if (!ids.length) return [];
+  const items = await call<LibraryItem[]>("datastoreGet", {
+    authKey,
+    collection: "libraryItem",
+    ids: ids.map(([id]) => id),
+    all: true,
+  });
+  if (!Array.isArray(items)) throw new Error("Invalid library response");
+  return items;
 }
 
 export async function library(authKey: string): Promise<LibraryItem[]> {
@@ -433,11 +466,16 @@ export async function libraryPut(
 ): Promise<void> {
   if (isNuvioProviderActive() && !forceAllow) return;
   if (ANIME_CLOUD_ID.test(item._id) && item.removed !== true) return;
-  await call<unknown>("datastorePut", {
-    authKey,
-    collection: "libraryItem",
-    changes: [item],
-  });
+  const finishMutation = beginLibraryProjectionMutation(authKey);
+  try {
+    await call<unknown>("datastorePut", {
+      authKey,
+      collection: "libraryItem",
+      changes: [item],
+    });
+  } finally {
+    finishMutation();
+  }
 }
 
 export async function removeStremioLibraryItem(

@@ -19,7 +19,16 @@ test("view warmup starts one import per idle turn, recovers from failure and can
   const code = ts.transpileModule(hook, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
   }).outputText;
-  new Function("useRef", "useEffect", "window", ...names, `${code}\nuseViewPreloader("");`)(
+  // Hover/focus intent listeners are registered on the document; no intent fires here.
+  const document = { addEventListener() {}, removeEventListener() {} };
+  new Function(
+    "useRef",
+    "useEffect",
+    "window",
+    "document",
+    ...names,
+    `${code}\nuseViewPreloader("");`,
+  )(
     (value) => ({ current: value }),
     (effect) => {
       cleanup = effect();
@@ -30,7 +39,11 @@ test("view warmup starts one import per idle turn, recovers from failure and can
         return handle;
       },
       cancelIdleCallback: (id) => idle.delete(id),
+      // Intent warmups use short timers; none are pending without hover or focus.
+      setTimeout: () => 0,
+      clearTimeout() {},
     },
+    document,
     ...names.map((name, i) => {
       const load = async () => {
         started.push(name);

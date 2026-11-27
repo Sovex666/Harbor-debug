@@ -9,6 +9,8 @@ import { createRoot } from "react-dom/client";
 import * as imgSize from "../src/lib/img-size.ts";
 import { createObjectUrlCache } from "../src/lib/object-url-cache.ts";
 import { createRequestScheduler } from "../src/lib/request-scheduler.ts";
+import { createThumbnailScheduler } from "../src/lib/thumbnail-scheduler.ts";
+import * as readiness from "../src/lib/image-readiness.ts";
 
 const POSTER = "https://image.tmdb.org/t/p/w500/title.jpg";
 const SMALL = "https://image.tmdb.org/t/p/w300/title.jpg";
@@ -47,6 +49,10 @@ async function withPosters(run) {
     },
     "./object-url-cache": { createObjectUrlCache: () => pool },
     "./request-scheduler": { createRequestScheduler },
+    "./thumbnail-scheduler": { createThumbnailScheduler },
+    "./image-readiness": readiness,
+    "./perf/diagnostics": { measureDiagnostic: () => () => {}, recordDiagnostic() {} },
+    "@/lib/image-readiness": readiness,
     "@tauri-apps/api/core": {
       convertFileSrc: (path) => path,
       invoke: async (command, args) => {

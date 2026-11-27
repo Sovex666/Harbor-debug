@@ -66,6 +66,17 @@ export function LibraryTab() {
         />
       </Section>
 
+      <Section title={t("Calendar")}>
+        <ToggleRow
+          label={t("Preload Calendar at startup")}
+          sub={t(
+            "Starts loading your library's Calendar shortly after Harbor opens, so it's ready when you open it. Uses some network in the background.",
+          )}
+          value={settings.calendarPreloadOnStartup}
+          onChange={(v) => update({ calendarPreloadOnStartup: v })}
+        />
+      </Section>
+
       <Section
         title={t("Local library")}
         subtitle={t(

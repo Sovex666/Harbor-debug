@@ -181,13 +181,14 @@ test("addon-only mode allows a configured TMDB key but blocks an empty one", asy
   const client = load("providers/tmdb/tmdb-client.ts", {
     "@/lib/metadata-policy": { addonOnlyMetadata: () => true },
     "@/lib/safe-fetch": { safeFetch: unexpected },
+    "@/lib/scoped-data-cache": { cachedBrowsePage: (_scope, loader) => loader() },
     "@/lib/request-scheduler": { createRequestScheduler: () => ({ schedule: unexpected }) },
     "./tmdb-catalog-cache": {
       createCatalogCache: () => ({ get: unexpected }),
       isCatalogPath: unexpected,
     },
     "@/lib/cache": { lruSet: unexpected },
-    "@/lib/media-cache": { cachedMedia: unexpected },
+    "@/lib/media-cache": { cachedMedia: unexpected, onMediaCacheClear() {} },
   });
   assert.equal(await client.get("", "movie/123"), null);
 });
@@ -291,6 +292,7 @@ test("a cancelled queued TMDB search does not send a request or cancel a repeat 
           return Response.json({ results: [] });
         },
       },
+      "@/lib/scoped-data-cache": { cachedBrowsePage: (_scope, loader) => loader() },
       "@/lib/request-scheduler": {
         createRequestScheduler: () => ({
           schedule: (key, task) =>
@@ -301,7 +303,7 @@ test("a cancelled queued TMDB search does not send a request or cancel a repeat 
       },
       "./tmdb-catalog-cache": { createCatalogCache: () => ({}) },
       "@/lib/cache": {},
-      "@/lib/media-cache": {},
+      "@/lib/media-cache": { onMediaCacheClear() {} },
     },
     { URL, AbortSignal, TextDecoder },
   );
@@ -526,12 +528,13 @@ test("a configured TMDB key reaches the network in addon-only mode", async () =>
           return new Response(JSON.stringify({ results: [] }));
         },
       },
+      "@/lib/scoped-data-cache": { cachedBrowsePage: (_scope, loader) => loader() },
       "@/lib/request-scheduler": {
         createRequestScheduler: () => ({ schedule: (_key, work) => work() }),
       },
       "./tmdb-catalog-cache": { createCatalogCache: () => ({}), isCatalogPath: () => false },
       "@/lib/cache": { lruSet() {} },
-      "@/lib/media-cache": { cachedMedia: (_kind, _key, work) => work() },
+      "@/lib/media-cache": { cachedMedia: (_kind, _key, work) => work(), onMediaCacheClear() {} },
     },
     { URL, Response, TextDecoder },
   );

@@ -34,7 +34,12 @@ import {
   sizeImageUrl,
 } from "@/lib/img-size";
 import { shouldLocalizePosters } from "@/lib/providers/tmdb/tmdb-image-lang";
-import { answeredFile, forgetAnsweredFile, useProxiedImageSrc } from "@/lib/remote-image-proxy";
+import {
+  answeredFile,
+  forgetAnsweredFile,
+  useProxiedImageSrc,
+} from "@/lib/remote-image-proxy";
+import { beginImageReadiness } from "@/lib/image-readiness";
 import { observeResize, observeWithin } from "@/lib/visibility";
 import { noteProbe, recordRenderCause } from "@/lib/render-cause";
 import { resolveRowScrollRoot, ScrollRootContext } from "./row";
@@ -439,7 +444,13 @@ function PosterBody({
   const failedRef = useRef<Set<string>>(new Set());
   const firedRef = useRef(false);
   const failBurstRef = useRef<{ t: number; n: number }>({ t: 0, n: 0 });
-  const shownRef = useRef<string | undefined>(undefined);
+  // Art that already decoded this session starts as shown, so the first paint has no shimmer.
+  // The layout effect further down still adds `data-loaded` once the proxied src is ready.
+  const [initialShown] = useState(() => {
+    const first = candidates[0];
+    return first && decodedPosters.has(first) ? first : undefined;
+  });
+  const shownRef = useRef<string | undefined>(initialShown);
   const onErrorRef = useRef(onError);
   onErrorRef.current = onError;
 
@@ -494,6 +505,10 @@ function PosterBody({
     enabled: canLoad,
     thumbWidthPx,
     originalSize: thumbWidthPx === undefined,
+    // The scheduler holds this fetch while the card's layer is parked. It reads the layer from the
+    // DOM, so a tab switch re-renders no poster.
+    layerRef: rootRef,
+    warmWhileParked: true,
   });
   // Rows and views take cards out of the page and build them again all the time. A picture that was
   // shown before is there on the first paint. The cache is asked all the same, and its answer wins.
@@ -508,6 +523,7 @@ function PosterBody({
     enabled: imageEnabled && displayed !== current,
     thumbWidthPx: displayedThumbWidth,
     originalSize: displayedThumbWidth === undefined,
+    layerRef: rootRef,
   });
   const stateCauseRef = useRef<{
     targetPx: number;
@@ -596,6 +612,7 @@ function PosterBody({
     (el: HTMLImageElement | null) => {
       imgElRef.current = el;
       if (!el) return;
+      beginImageReadiness(el);
       if (el.complete) {
         // complete=true with no decoded pixels can mean a deferred or
         // not-yet-started load. Only the img onError event is a failure.
@@ -649,6 +666,19 @@ function PosterBody({
     <div
       ref={rootRef}
       data-poster-effect={effect}
+      data-poster-state={exhausted ? "unavailable" : "pending"}
+      // Diagnostics: which gate a pending poster is waiting on. A parked layer's hold lives in the
+      // image scheduler, so a poster waiting on it reports "source".
+      data-poster-wait={
+        exhausted
+          ? undefined
+          : qMult !== 0 && targetPx <= 0
+            ? "unsized"
+            : !currentSrc
+              ? "source"
+              : "image"
+      }
+      data-poster-fallback={cursor || undefined}
       className={`harbor-poster your-card relative w-full overflow-hidden rounded-[var(--poster-radius,12px)] ${className}`}
       style={showPlate ? { background: gradient(hue) } : undefined}
     >

@@ -73,6 +73,7 @@ function recoveryHarness() {
     pickers: any[][] = [],
     cleared: any[][] = [];
   const dependencies = {
+    tracePlayback() {},
     getPlaybackPosition: () => position,
     getPlaybackBuffered: () => 0,
     usePlaybackFlag: (read: () => boolean) => read(),

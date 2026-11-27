@@ -38,7 +38,7 @@ import { useHideAnimeRows, useHideAnimeSlides } from "@/lib/anime-hide";
 import { StreamingRail } from "@/components/streaming-rail";
 import { TopRankCard } from "@/components/top-rank-card";
 import { setTop10Metas } from "@/lib/top10-set";
-import { fetchHeroFeed } from "@/lib/feed/hero-pool";
+import { fetchHeroFeed, subscribeHeroFeed } from "@/lib/feed/hero-pool";
 import { hasTmdbProviderAddon, loadAddonRows, cachedUserAddons, type AddonRow } from "@/lib/addons";
 import { isAnimeRow } from "@/views/anime";
 import { buildArabicHomeRows } from "@/lib/arabic/home-rows";
@@ -140,6 +140,7 @@ import { buildLetterboxdHomeRows } from "@/lib/stremboxd/home-rails";
 import { useMediaFavorites, type MediaEntry } from "@/lib/media-favorites";
 import { useLocalWatchlist } from "@/lib/local-watchlist";
 import { useScrollMemory, useHomeResetTick } from "@/lib/view";
+import { recordDiagnostic } from "@/lib/perf/diagnostics";
 import { CustomizableRows } from "./home/customizable-rows";
 import { CustomizeBar } from "./home/customize-bar";
 import { CWSection } from "./home/cw-section";
@@ -157,6 +158,8 @@ import {
 } from "./home/home-rows";
 import type { HomeRow } from "./home/home-types";
 import { mergeLoadedHomeRows } from "./home/merge-loaded-rows";
+import { useBrowseCacheUpdates } from "@/hooks/use-browse-cache-updates";
+import { replaceCatalogFirstPage } from "@/lib/catalog-page-refresh";
 import { RowSkeleton } from "./home/row-skeleton";
 import { AddSourceModal } from "@/components/add-source-modal";
 import { updateSourceFolder, type SourceRow } from "@/lib/custom-sources";
@@ -186,6 +189,14 @@ function unrepresentedCwItems(manual: LibraryItem[], pool: LibraryItem[]): Libra
   return out;
 }
 
+// Re-activating Home skips a row's first-page refresh if it was refreshed this recently.
+const HOME_ROW_REFRESH_MS = 5 * 60 * 1000;
+const homeRowRefreshedAt = new Map<string, number>();
+
+function sameMetaIds(a: readonly Meta[], b: readonly Meta[]): boolean {
+  return a.length === b.length && a.every((meta, i) => meta.id === b[i]?.id);
+}
+
 export function Home({
   active = true,
   onReady,
@@ -210,6 +221,9 @@ export function Home({
   const contentDrag = useContentDrag();
   const t = useT();
   const uiLang = useUiLanguage();
+  useEffect(() => {
+    recordDiagnostic("view:home:mount");
+  }, []);
   const [editMode, setEditMode] = useState(false);
   const [isAddSourceModalOpen, setAddSourceModalOpen] = useState(false);
   const [rows, setRows] = useState<HomeRow[]>([]);
@@ -251,6 +265,24 @@ export function Home({
   useEffect(() => subscribePlayback(() => setLocalWatched(recentlyPlayed())), []);
   const [heroPool, setHeroPool] = useState<Meta[]>([]);
   const [heroRows, setHeroRows] = useState<string[]>([]);
+  useEffect(() => {
+    if (!settings.heroFeed || settings.heroFeed === "classic") return;
+    let cancelled = false;
+    const unsubscribe = subscribeHeroFeed(() => {
+      void fetchHeroFeed(settings.heroFeed)
+        .then((feed) => {
+          if (!cancelled && feed.length >= 4) {
+            setHeroPool(feed);
+            setHeroRows([]);
+          }
+        })
+        .catch(() => {});
+    });
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, [settings.heroFeed]);
   const [heroReady, setHeroReady] = useState(false);
   useEffect(() => {
     if (rows.length > 0) startupMarkOnce("home.rows-committed");
@@ -274,10 +306,77 @@ export function Home({
   const { isConnected: anilistConnected, session: anilistSession } = useAnilist();
   const letterboxd = useLetterboxd();
   const rowsRef = useRef<HomeRow[]>([]);
+  const browseRevision = useBrowseCacheUpdates(active);
+  const refreshableRowsKey = rows
+    .filter((row) => row.firstPageLength != null)
+    .map((row) => row.key)
+    .join("|");
   const loadingRef = useRef(new Map<string, NonNullable<HomeRow["fetcher"]>>());
   useEffect(() => {
     rowsRef.current = rows;
   }, [rows]);
+
+  // Public first pages refresh independently from the full Home build so loaded
+  // pagination, add-on rows, focus, and scroll survive a background update.
+  // Plain re-activation only refreshes rows stale past HOME_ROW_REFRESH_MS; any
+  // change to the inputs below refreshes every row.
+  const refreshKey = JSON.stringify([
+    browseRevision,
+    refreshableRowsKey,
+    authKey,
+    settings.tmdbKey,
+    settings.tmdbLanguage,
+    settings.region,
+    settings.homeMode,
+  ]);
+  const lastRefreshKeyRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!active) return;
+    const inputsChanged = refreshKey !== lastRefreshKeyRef.current;
+    lastRefreshKeyRef.current = refreshKey;
+    const now = Date.now();
+    let cancelled = false;
+    for (const row of rowsRef.current) {
+      if (!row.fetcher || row.firstPageLength == null) continue;
+      const refreshedAt = homeRowRefreshedAt.get(row.key);
+      if (!inputsChanged && refreshedAt != null && now - refreshedAt < HOME_ROW_REFRESH_MS) {
+        continue;
+      }
+      void row
+        .fetcher(1)
+        .then((first) => {
+          if (cancelled || first.length === 0) return;
+          homeRowRefreshedAt.set(row.key, Date.now());
+          startTransition(() =>
+            setRows((current) => {
+              let rowChanged = false;
+              const next = current.map((candidate) => {
+                if (candidate.key !== row.key || candidate.fetcher !== row.fetcher) return candidate;
+                const refreshed = replaceCatalogFirstPage(candidate, first, MAX_PER_ROW);
+                // Same first-page ids in the same browse revision: keep the existing row
+                // object so the memoized row and its cards do not re-render.
+                const currentIds = candidate.metas.slice(
+                  0,
+                  candidate.firstPageLength ?? candidate.metas.length,
+                );
+                const nextIds = refreshed.metas.slice(0, refreshed.firstPageLength);
+                if (candidate.browseRevision === browseRevision && sameMetaIds(currentIds, nextIds)) {
+                  return candidate;
+                }
+                rowChanged = true;
+                return { ...refreshed, browseRevision };
+              });
+              // Returning the previous array lets React bail out when nothing changed.
+              return rowChanged ? next : current;
+            }),
+          );
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [active, refreshKey, browseRevision]);
 
   const loadMore = useCallback((rowKey: string) => {
     const row = rowsRef.current.find((r) => r.key === rowKey);

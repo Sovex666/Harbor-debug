@@ -66,6 +66,7 @@ export async function fetchSimklCdnArchive(
   year: number,
   month: number,
   catalog: "tv" | "anime" | "movie",
+  strict = false,
 ): Promise<CalendarItem[]> {
   const filename = catalog === "movie" ? "movie_release.json" : `${catalog}.json`;
   const simklMonth = month + 1;
@@ -73,31 +74,50 @@ export async function fetchSimklCdnArchive(
     const res = await fetch(cdnUrl(`${year}/${simklMonth}/${filename}`), {
       headers: { "User-Agent": UA },
     });
-    if (!res.ok) return [];
-    const data = parseSimklCalendar(await res.json());
+    if (!res.ok) throw new Error("SIMKL calendar request failed");
+    const payload = await res.json();
+    if (
+      strict &&
+      (!payload ||
+        !Array.isArray(payload.calendar) ||
+        !payload.metadata ||
+        typeof payload.metadata !== "object" ||
+        Array.isArray(payload.metadata))
+    ) {
+      throw new Error("Invalid SIMKL calendar response");
+    }
+    const data = parseSimklCalendar(payload);
     const type = catalog === "movie" ? "movie" : "tv";
     return data.map((item) => mapCdnItem(item, type, catalog === "anime"));
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return [];
   }
 }
 
 const calendarCache = new Map<string, Promise<CalendarItem[]>>();
 
-export function fetchSimklCdnCalendar(year: number, month: number): Promise<CalendarItem[]> {
-  const cacheKey = `${year}-${month}`;
+export function fetchSimklCdnCalendar(
+  year: number,
+  month: number,
+  strict = false,
+): Promise<CalendarItem[]> {
+  const cacheKey = `${year}-${month}:${strict}`;
   let p = calendarCache.get(cacheKey);
   if (!p) {
     p = Promise.all([
-      fetchSimklCdnArchive(year, month, "tv"),
-      fetchSimklCdnArchive(year, month, "anime"),
-      fetchSimklCdnArchive(year, month, "movie"),
+      fetchSimklCdnArchive(year, month, "tv", strict),
+      fetchSimklCdnArchive(year, month, "anime", strict),
+      fetchSimklCdnArchive(year, month, "movie", strict),
     ]).then(([tv, anime, movies]) => {
       const combined = [...tv, ...anime, ...movies];
       combined.sort((a, b) => a.releaseDate.localeCompare(b.releaseDate));
       return combined;
     });
     calendarCache.set(cacheKey, p);
+    void p.catch(() => {
+      if (calendarCache.get(cacheKey) === p) calendarCache.delete(cacheKey);
+    });
   }
   return p;
 }

@@ -17,6 +17,7 @@ import type { NavItemId } from "@/chrome/nav-items";
 import { NavHiddenTray, NavEditableItem, useNavDrag } from "@/chrome/nav-edit";
 import { useNavEditMode } from "@/chrome/nav-edit-mode";
 import { useSidebarNavigation } from "./context-page-navigation";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 
 export function Sidebar() {
   const editing = useNavEditMode();
@@ -252,6 +253,9 @@ function ScrollableNav({
     el.scrollTo({ top: 0, behavior: "smooth" });
   };
 
+  const selectView = useInstantNav();
+  const navMark = collapsed ? "collapsed" : undefined;
+
   return (
     <div className="relative flex min-h-0 flex-1 flex-col">
       <div
@@ -268,7 +272,7 @@ function ScrollableNav({
               retainLabels={retainLabels}
               big={!!kid}
               active={view === item.view}
-              onClick={() => setView(item.view)}
+              onClick={(e) => selectView(item.view, e, navMark)}
             />
           ))}
           {kid && (
@@ -302,7 +306,9 @@ function ScrollableNav({
                 collapsed={collapsed}
                 retainLabels={retainLabels}
                 active={view === item.view}
-                onClick={() => (gated ? onPinNav(item.view) : setView(item.view))}
+                onClick={(e) =>
+                  gated ? onPinNav(item.view) : selectView(item.view, e, navMark)
+                }
               />
             );
           })}
@@ -379,7 +385,7 @@ function NavItem({
   render: (active: boolean, hovered?: boolean) => ReactNode;
   label: string;
   active?: boolean;
-  onClick?: () => void;
+  onClick?: (e?: React.MouseEvent<HTMLButtonElement>) => void;
   gated?: boolean;
   collapsed?: boolean;
   retainLabels?: boolean;

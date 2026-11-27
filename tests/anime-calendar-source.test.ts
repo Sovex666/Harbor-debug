@@ -5,6 +5,7 @@ import { readFileSync } from "node:fs";
 // @ts-expect-error Node test types are intentionally outside the browser-only tsconfig.
 import test from "node:test";
 import ts from "typescript";
+import { CalendarCache } from "../src/lib/calendar-cache.ts";
 
 class FakeAniListError extends Error {
   status: number;
@@ -121,6 +122,15 @@ test("rate limits and later-page errors are not mistaken for empty months", asyn
 test("a failed AniList calendar fetch is retried instead of cached as empty", async () => {
   let calls = 0;
   const api = load("src/lib/calendar-sources.ts", {
+    "./providers/tmdb/tmdb-client": { effectiveTmdbLanguage: () => "en" },
+    "./calendar-cache": { CalendarCache },
+    "./calendar-cache-scope": {
+      calendarScopeKey: () => "scope",
+      invalidateCalendarCaches() {},
+      registerCalendarCache() {},
+    },
+    "./calendar-scheduler": {},
+    "./calendar-library": {},
     "./calendar-time": {
       localDateTimeFromIso: () => ({ date: "" }),
       toLocalDateISO: () => "",

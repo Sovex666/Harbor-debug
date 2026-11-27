@@ -6,6 +6,7 @@ import {
   type RenderReportRow,
 } from "./memory-dump-text";
 import { getNativeMem, getRamTier } from "./native-memory";
+import { diagnosticSnapshot } from "./perf/diagnostics";
 import {
   probeRows,
   renderCauseRows,
@@ -365,30 +366,34 @@ export function getViewportInfo(): ViewportInfo {
 function buildDump(): string {
   const now = Date.now();
   const sinceReset = resetAt || (fullHistory[0]?.ts ?? now);
-  return buildDumpText({
-    now,
-    elapsedSec: (now - sinceReset) / 1000,
-    baselineHeapMB,
-    currentHeapMB: snapshotHeapMB(),
-    peakHeapMB,
-    dom: snapshotDom(),
-    networkBytes,
-    events: fullHistory.filter((s) => s.ts >= sinceReset),
-    navStack,
-    caches: reportCaches(),
-    cacheHistory: cacheSizeHistory,
-    renderReport: getRenderReport(),
-    nativeMem: getNativeMem(),
-    ramTier: getRamTier(),
-    capabilities: getInstrumentationSupport(),
-    drift: driftStats(),
-    frames: getFrameStats(),
-    viewport: getViewportInfo(),
-    renderCauses: renderCauseRows(),
-    storeNotifies: storeNotifyRows(),
-    probes: probeRows(),
-    bridges: bridgeRows(),
-  });
+  return (
+    buildDumpText({
+      now,
+      elapsedSec: (now - sinceReset) / 1000,
+      baselineHeapMB,
+      currentHeapMB: snapshotHeapMB(),
+      peakHeapMB,
+      dom: snapshotDom(),
+      networkBytes,
+      events: fullHistory.filter((s) => s.ts >= sinceReset),
+      navStack,
+      caches: reportCaches(),
+      cacheHistory: cacheSizeHistory,
+      renderReport: getRenderReport(),
+      nativeMem: getNativeMem(),
+      ramTier: getRamTier(),
+      capabilities: getInstrumentationSupport(),
+      drift: driftStats(),
+      frames: getFrameStats(),
+      viewport: getViewportInfo(),
+      renderCauses: renderCauseRows(),
+      storeNotifies: storeNotifyRows(),
+      probes: probeRows(),
+      bridges: bridgeRows(),
+    }) +
+    "\n\nAPP PERFORMANCE BREADCRUMBS (bounded, numeric only)\n" +
+    JSON.stringify(diagnosticSnapshot(), null, 2)
+  );
 }
 
 function downloadText(text: string, filename: string): void {

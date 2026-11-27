@@ -18,6 +18,13 @@ type Pool = { at: number; sources: Record<string, Meta[]> };
 
 let mem: Pool | null = null;
 let inflight: Promise<Pool | null> | null = null;
+const listeners = new Set<() => void>();
+export function subscribeHeroFeed(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
 
 function fromStore(): Pool | null {
   if (mem) return mem;
@@ -36,22 +43,24 @@ function fromStore(): Pool | null {
   return null;
 }
 
-async function load(): Promise<Pool | null> {
-  const cached = fromStore();
-  if (cached && Date.now() - cached.at < TTL) return cached;
+async function refresh(cached: Pool | null): Promise<Pool | null> {
   if (inflight) return inflight;
   inflight = (async () => {
     try {
+      // Demand and prefetch share this request. A departing speculative owner
+      // must not abort a Home consumer that joined it.
       const res = await safeFetch(HOSTED_URL, { cache: "no-cache" });
       if (!res.ok) return cached;
       const j = (await res.json()) as { sources?: Record<string, Meta[]> };
       if (!j || !j.sources || !Array.isArray(j.sources.now)) return cached;
       mem = { at: Date.now(), sources: j.sources };
+      const changed = JSON.stringify(cached?.sources) !== JSON.stringify(j.sources);
       try {
         localStorage.setItem(CACHE_KEY, JSON.stringify(mem));
       } catch {
         /* ignore */
       }
+      if (changed) for (const listener of listeners) listener();
       return mem;
     } catch {
       return cached;
@@ -62,9 +71,22 @@ async function load(): Promise<Pool | null> {
   return inflight;
 }
 
-export async function fetchHeroFeed(source: HeroFeed): Promise<Meta[]> {
+async function load(signal?: AbortSignal): Promise<Pool | null> {
+  const cached = fromStore();
+  if (cached && Date.now() - cached.at < TTL) return cached;
+  // Stale hero art is still usable. Start revalidation without holding the
+  // Home route on the network after a restart.
+  if (cached) {
+    void refresh(cached).catch(() => {});
+    return cached;
+  }
+  if (signal?.aborted) return cached;
+  return refresh(null);
+}
+
+export async function fetchHeroFeed(source: HeroFeed, signal?: AbortSignal): Promise<Meta[]> {
   if (source === "classic") return [];
-  const p = await load();
+  const p = await load(signal);
   if (!p) return [];
   const key = SRC[source] ?? "now";
   const arr = p.sources[key] ?? p.sources.now ?? [];

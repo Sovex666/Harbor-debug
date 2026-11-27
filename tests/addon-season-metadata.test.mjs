@@ -111,6 +111,7 @@ test("addon-only permits a configured TMDB season synopsis request", async () =>
         };
       },
     },
+    "@/lib/scoped-data-cache": { cachedBrowsePage: (_scope, loader) => loader() },
     "@/lib/request-scheduler": {
       createRequestScheduler: () => ({ schedule: (_key, work) => work(), pauseFor() {} }),
     },
@@ -120,6 +121,7 @@ test("addon-only permits a configured TMDB season synopsis request", async () =>
     },
     "@/lib/cache": { lruSet() {} },
     "@/lib/media-cache": {
+      onMediaCacheClear() {},
       cachedMedia: (_type, _key, work) => work(),
       metadataCacheTtl: () => 60_000,
       MEDIA_TTL: { recent: 60_000 },

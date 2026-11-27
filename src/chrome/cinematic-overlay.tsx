@@ -14,6 +14,7 @@ import { useSettings } from "@/lib/settings";
 import { getThemeById } from "@/lib/theme";
 import { useParental } from "@/lib/parental";
 import { useView, type View } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 import { ParentalPinModal } from "@/components/parental-pin-modal";
 import { close, minimize, toggleMaximize, useMaximized } from "@/lib/window";
 import { OverflowNav, type NavEntry } from "@/chrome/nav-overflow";
@@ -26,6 +27,7 @@ const IS_TAURI = typeof window !== "undefined" && "__TAURI_INTERNALS__" in windo
 
 export function CinematicOverlay() {
   const { view, setView, chromeHidden } = useView();
+  const selectView = useInstantNav();
   const { locked, unlock, hiddenTabs } = useParental();
   const { settings } = useSettings();
   const { setOpen: setSearchOpen } = useSearchActions();
@@ -44,12 +46,12 @@ export function CinematicOverlay() {
     settings.theme.preset !== "custom" ? getThemeById(settings.theme.preset) : null;
   const customMark = themePreset?.logo?.mark ?? null;
 
-  const navigate = (item: NavItem) => {
+  const navigate = (item: NavItem, e?: React.MouseEvent<HTMLElement>) => {
     if (item.parentalKey && locked && hiddenTabs[item.parentalKey]) {
       setPinFor(item.view);
       return;
     }
-    setView(item.view);
+    selectView(item.view, e, "cinematic");
   };
 
   const navEntries: NavEntry[] = applyNavCustomization(
@@ -71,7 +73,7 @@ export function CinematicOverlay() {
         key: item.id,
         label,
         active,
-        onSelect: () => navigate(item),
+        onSelect: (e) => navigate(item, e),
         node: <CinematicNavButton item={item} active={active} label={label} navigate={navigate} />,
       };
     });
@@ -96,7 +98,7 @@ export function CinematicOverlay() {
             type="button"
             tabIndex={-1}
             data-tv-skip="true"
-            onClick={() => setView("home")}
+            onClick={(e) => selectView("home", e)}
             className="flex shrink-0 items-center gap-2 text-ink"
             aria-label={t("chrome.harborHome")}
           >
@@ -233,7 +235,7 @@ function CinematicNavButton({
   item: NavItem;
   active: boolean;
   label: string;
-  navigate: (item: NavItem) => void;
+  navigate: (item: NavItem, e?: React.MouseEvent<HTMLElement>) => void;
 }) {
   const { open: openContextMenu } = useContextMenu();
   const editing = useNavEditMode();
@@ -242,7 +244,7 @@ function CinematicNavButton({
     <NavEditableItem itemId={item.id}>
       <button
         type="button"
-        onClick={() => navigate(item)}
+        onClick={(e) => navigate(item, e)}
         onContextMenu={(e) =>
           openContextMenu(e, {
             kind: "nav",

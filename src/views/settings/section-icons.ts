@@ -36,6 +36,7 @@ export const SECTION_ICONS: Record<SectionId, string> = {
   tv: "Tv",
   bigPicture: "MonitorPlay",
   storage: "HardDrive",
+  debugging: "Bug",
   trackers: "Activity",
   updates: "ArrowUpCircle",
   advanced: "SlidersHorizontal",

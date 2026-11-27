@@ -6,13 +6,19 @@ import { close, openUrl } from "@/lib/window";
 import { toggleWindowFullscreen } from "@/lib/fullscreen-state";
 import { checkForUpdate } from "@/lib/updater/use-update";
 import { useSettings } from "@/lib/settings";
-import { useView } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 import { useT } from "@/lib/i18n";
 import { HARBOR_BUGS_BASE } from "@/lib/config/endpoints";
 import { reloadAppWindow } from "@/lib/app-reload";
 
 type Item =
-  | { kind: "action"; label: string; hint?: string; onClick: () => void; danger?: boolean }
+  | {
+      kind: "action";
+      label: string;
+      hint?: string;
+      onClick: (e?: React.MouseEvent<HTMLButtonElement>) => void;
+      danger?: boolean;
+    }
   | { kind: "sep" }
   | { kind: "label"; label: string };
 
@@ -20,7 +26,7 @@ type Menu = { id: string; label: string; items: Item[] };
 
 export function HybridMenuBar() {
   const t = useT();
-  const { setView } = useView();
+  const selectView = useInstantNav();
   const { settings, update } = useSettings();
   const [openId, setOpenId] = useState<string | null>(null);
 
@@ -43,7 +49,7 @@ export function HybridMenuBar() {
       id: "file",
       label: t("File"),
       items: [
-        { kind: "action", label: t("Settings"), onClick: () => setView("settings") },
+        { kind: "action", label: t("Settings"), onClick: (e) => selectView("settings", e) },
         {
           kind: "action",
           label: t("Reload"),
@@ -74,15 +80,15 @@ export function HybridMenuBar() {
       id: "go",
       label: t("Go"),
       items: [
-        { kind: "action", label: t("Home"), onClick: () => setView("home") },
-        { kind: "action", label: t("Discover"), onClick: () => setView("discover") },
-        { kind: "action", label: t("Movies"), onClick: () => setView("movies") },
-        { kind: "action", label: t("Shows"), onClick: () => setView("shows") },
-        { kind: "action", label: t("Anime"), onClick: () => setView("anime") },
-        { kind: "action", label: t("Live TV"), onClick: () => setView("live") },
-        { kind: "action", label: t("Manga"), onClick: () => setView("manga") },
-        { kind: "action", label: t("eBook"), onClick: () => setView("ebook") },
-        { kind: "action", label: t("Library"), onClick: () => setView("library") },
+        { kind: "action", label: t("Home"), onClick: (e) => selectView("home", e) },
+        { kind: "action", label: t("Discover"), onClick: (e) => selectView("discover", e) },
+        { kind: "action", label: t("Movies"), onClick: (e) => selectView("movies", e) },
+        { kind: "action", label: t("Shows"), onClick: (e) => selectView("shows", e) },
+        { kind: "action", label: t("Anime"), onClick: (e) => selectView("anime", e) },
+        { kind: "action", label: t("Live TV"), onClick: (e) => selectView("live", e) },
+        { kind: "action", label: t("Manga"), onClick: (e) => selectView("manga", e) },
+        { kind: "action", label: t("eBook"), onClick: (e) => selectView("ebook", e) },
+        { kind: "action", label: t("Library"), onClick: (e) => selectView("library", e) },
       ],
     },
     {
@@ -141,8 +147,8 @@ function Dropdown({ items, onClose }: { items: Item[]; onClose: () => void }) {
           <button
             key={i}
             type="button"
-            onClick={() => {
-              it.onClick();
+            onClick={(e) => {
+              it.onClick(e);
               onClose();
             }}
             className={`flex w-full items-center justify-between gap-8 px-3 py-1.5 text-start text-[12.5px] transition-colors ${

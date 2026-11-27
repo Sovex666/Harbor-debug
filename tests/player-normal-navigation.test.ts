@@ -36,6 +36,12 @@ function harness() {
   const calls: unknown[] = [];
   let fullscreen = false;
   const dependencies: Record<string, unknown> = {
+    "./perf/diagnostics": {
+      recordDiagnostic() {},
+      beginDiagnosticNavigation() {},
+      commitDiagnosticNavigation() {},
+      registerDiagnosticNavigator: () => () => {},
+    },
     react: React,
     "react/jsx-runtime": jsx,
     "lucide-react": icons,
@@ -246,11 +252,21 @@ test("catalog stays mounted behind detail but unmounts on a sidebar root switch"
   const useIdleEvict = new Function(
     "useState",
     "useEffect",
+    "useRef",
+    "startTransition",
     "subscribeMemoryPressure",
     "IDLE_EVICT_MS",
     "PRESSURE_EVICT_MS",
     output + "\nreturn useIdleEvict;",
-  )(React.useState, React.useEffect, () => () => {}, 10000, 1500);
+  )(
+    React.useState,
+    React.useEffect,
+    React.useRef,
+    React.startTransition,
+    () => () => {},
+    10000,
+    1500,
+  );
   const { ViewProvider, useView } = h.load("src/lib/view.tsx");
   let view: any;
   let mounts = 0;

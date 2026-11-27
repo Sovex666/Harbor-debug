@@ -22,6 +22,10 @@ import { buildLetterboxdHomeRows } from "@/lib/stremboxd/home-rails";
 import { LetterboxdRowMenu } from "@/components/letterboxd/letterboxd-row-menu";
 import type { HomeRow } from "./home/home-types";
 import { useCollectionRowsForPage } from "@/lib/page-collection-rows";
+import { replaceCatalogFirstPage } from "@/lib/catalog-page-refresh";
+import { useBrowseCacheUpdates } from "@/hooks/use-browse-cache-updates";
+import { useAuth } from "@/lib/auth";
+import { useProfiles } from "@/lib/profiles";
 import { buildMovieHero, HERO_POOL_TARGET, movieSpecs, rotateDaily } from "./movies/movie-specs";
 
 const MAX_PER_ROW = 30;
@@ -36,11 +40,15 @@ type MovieRow = {
   page: number;
   hasMore: boolean;
   fetcher?: (page: number) => Promise<Meta[]>;
+  firstPageLength?: number;
   variant?: "rank";
 };
 
 export function Movies({ active = true }: { active?: boolean }) {
+  const loadedScope = useRef<string | null>(null);
   const { settings } = useSettings();
+  const { authKey, user } = useAuth();
+  const { activeProfile } = useProfiles();
   const { openGrid } = useView();
   const t = useT();
   const letterboxd = useLetterboxd();
@@ -52,6 +60,15 @@ export function Movies({ active = true }: { active?: boolean }) {
   const loadingRef = useRef<Set<string>>(new Set());
   const scrollRef = useRef<HTMLElement>(null);
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+  const browseRevision = useBrowseCacheUpdates(active);
+  const catalogScope = JSON.stringify([
+    settings.tmdbKey,
+    settings.region,
+    settings.tmdbLanguage,
+    authKey,
+    user?._id,
+    activeProfile?.id,
+  ]);
 
   useEffect(() => {
     rowsRef.current = rows;
@@ -106,8 +123,12 @@ export function Movies({ active = true }: { active?: boolean }) {
 
   useEffect(() => {
     let cancelled = false;
-    setHero([]);
-    setRows([]);
+    if (loadedScope.current !== catalogScope) {
+      loadedScope.current = catalogScope;
+      rowsRef.current = [];
+      setHero([]);
+      setRows([]);
+    }
     (async () => {
       const seen = recentlyPlayed();
       if (settings.tmdbKey) {
@@ -125,12 +146,24 @@ export function Movies({ active = true }: { active?: boolean }) {
             const row: MovieRow = {
               key: spec.key,
               title: spec.title,
-              metas,
+              metas: metas.slice(0, MAX_PER_ROW),
               page: 1,
               hasMore: !spec.noPaginate && metas.length >= 14,
               fetcher: spec.noPaginate ? undefined : spec.fetcher,
+              firstPageLength:
+                spec.noPaginate || spec.key === "black-and-white"
+                  ? undefined
+                  : Math.min(metas.length, MAX_PER_ROW),
             };
-            startTransition(() => setRows((current) => upsertOrdered(current, row, order)));
+            const normalized =
+              row.firstPageLength == null
+                ? row
+                : replaceCatalogFirstPage(
+                    { ...row, metas: [], firstPageLength: 0 },
+                    metas,
+                    MAX_PER_ROW,
+                  );
+            startTransition(() => setRows((current) => upsertOrdered(current, normalized, order)));
             return true;
           }),
         );
@@ -191,17 +224,42 @@ export function Movies({ active = true }: { active?: boolean }) {
       built.push({
         key: "black-and-white",
         title: "In Black and White",
-        metas: await blackAndWhitePage(1),
+        metas: (await blackAndWhitePage(1)).slice(0, MAX_PER_ROW),
         page: 1,
         hasMore: false,
         fetcher: blackAndWhitePage,
       });
-      if (!cancelled) startTransition(() => setRows(built));
+      if (cancelled) return;
+      startTransition(() => setRows(built));
     })().catch(console.error);
     return () => {
       cancelled = true;
     };
-  }, [settings.tmdbKey, settings.region]);
+  }, [catalogScope]);
+
+  useEffect(() => {
+    if (!active) return;
+    const snapshot = rowsRef.current.filter((row) => row.firstPageLength != null && row.fetcher);
+    if (snapshot.length === 0) return;
+    let cancelled = false;
+    for (const row of snapshot) {
+      void withTimeout(row.fetcher!(1), CATALOG_REQUEST_TIMEOUT_MS)
+        .then((first) => {
+          if (cancelled || loadedScope.current !== catalogScope || first.length === 0) return;
+          setRows((current) =>
+            current.map((currentRow) =>
+              currentRow.key === row.key && currentRow.firstPageLength != null
+                ? replaceCatalogFirstPage(currentRow, first, MAX_PER_ROW)
+                : currentRow,
+            ),
+          );
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [active, browseRevision, catalogScope]);
 
   const loadMore = useCallback((rowKey: string) => {
     if (loadingRef.current.has(rowKey)) return;
@@ -209,14 +267,20 @@ export function Movies({ active = true }: { active?: boolean }) {
     if (!row || !row.fetcher || !row.hasMore || row.metas.length >= MAX_PER_ROW) return;
     loadingRef.current.add(rowKey);
     const next = row.page + 1;
+    const scope = loadedScope.current;
     row
       .fetcher(next)
       .then((more) => {
+        if (loadedScope.current !== scope) return;
         setRows((rs) =>
           rs.map((r) => {
             if (r.key !== rowKey) return r;
             const ids = new Set(r.metas.map((m) => m.id));
-            const fresh = more.filter((m) => !ids.has(m.id));
+            const fresh = more.filter((m) => {
+              if (ids.has(m.id)) return false;
+              ids.add(m.id);
+              return true;
+            });
             const combined = [...r.metas, ...fresh];
             const reachedCap = combined.length >= MAX_PER_ROW;
             return {

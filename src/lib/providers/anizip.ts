@@ -14,11 +14,13 @@ import {
 const ENDPOINT = "https://api.ani.zip/mappings";
 const GAP_MS = 90;
 const NEG_TTL_MS = 120000;
+const TRANSIENT_NEG_TTL_MS = 30 * 60 * 1000;
 const NEG_PERSIST_TTL_MS = 6 * 60 * 60 * 1000;
 const INCOMPLETE_TTL_MS = 24 * 60 * 60 * 1000;
 const COMPLETE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 const MEMORY_MAX = 512;
 const cache = new Map<string, { value: AniZipMapping | null; expiresAt: number }>();
+// Maps a query to the time its negative entry expires.
 const negCache = new Map<string, number>();
 const inflight = new Map<string, Promise<AniZipLookup>>();
 
@@ -28,9 +30,9 @@ function remember(query: string, value: AniZipMapping | null, expiresAt: number)
   while (cache.size > MEMORY_MAX) cache.delete(cache.keys().next().value!);
 }
 
-function rememberNegative(query: string, at: number): void {
+function rememberNegative(query: string, ttlMs: number): void {
   negCache.delete(query);
-  negCache.set(query, at);
+  negCache.set(query, Date.now() + ttlMs);
   while (negCache.size > MEMORY_MAX) negCache.delete(negCache.keys().next().value!);
 }
 
@@ -247,10 +249,10 @@ async function get(
   if (!forceRefresh && memory && memory.expiresAt > Date.now()) return memory.value;
   if (memory) cache.delete(query);
   if (!forceRefresh) {
-    const negAt = negCache.get(query);
+    const negUntil = negCache.get(query);
     // negCache only holds real failures: a 404 is remembered in `cache` as a
     // null value, and an outage with a stored mapping returns that mapping.
-    if (negAt != null && Date.now() - negAt < NEG_TTL_MS) {
+    if (negUntil != null && negUntil > Date.now()) {
       if (strict) throw new AniZipUnavailableError();
       return null;
     }
@@ -287,7 +289,12 @@ async function loadLookup(
     const ac = new AbortController();
     const res = await throttled(`${ENDPOINT}?${query}`, ac);
     if (!res.ok) {
-      if (res.status === 404) {
+      // 404 and other 4xx (except 429) are definitive and persisted as a miss.
+      // 429 and 5xx are transient: they only get a short memory-only negative.
+      // A stored mapping is always kept as the fallback.
+      const definitive =
+        res.status === 404 || (res.status >= 400 && res.status < 500 && res.status !== 429);
+      if (definitive && !stored?.value) {
         const fetchedAt = Date.now();
         remember(query, null, fetchedAt + NEG_TTL_MS);
         void animeDbWriteProvider({
@@ -304,7 +311,7 @@ async function loadLookup(
         remember(query, stored.value, Date.now() + NEG_TTL_MS);
         return { value: stored.value, unavailable: false };
       }
-      rememberNegative(query, Date.now());
+      rememberNegative(query, TRANSIENT_NEG_TTL_MS);
       return { value: null, unavailable: true };
     }
     const json = (await res.json()) as AniZipMapping;
@@ -327,7 +334,7 @@ async function loadLookup(
       remember(query, stored.value, Date.now() + NEG_TTL_MS);
       return { value: stored.value, unavailable: false };
     }
-    rememberNegative(query, Date.now());
+    rememberNegative(query, TRANSIENT_NEG_TTL_MS);
     return { value: null, unavailable: true };
   } finally {
     inflight.delete(query);

@@ -77,7 +77,7 @@ export const TOP_GROUPS: TopGroup[] = [
     section: "SYSTEM",
     label: "System",
     sub: "Storage, automation, and the settings most people never need.",
-    children: ["storage", "advanced"],
+    children: ["storage", "debugging", "advanced"],
   },
   {
     id: "help",

@@ -15,7 +15,28 @@ pub(crate) fn mpv_argv_command(mpv: &Mpv, argv: &[&str]) -> Result<(), String> {
         .collect::<Result<Vec<_>, _>>()?;
     let mut ptrs: Vec<*const std::os::raw::c_char> = cstrings.iter().map(|c| c.as_ptr()).collect();
     ptrs.push(std::ptr::null());
+    let lifecycle = argv
+        .first()
+        .copied()
+        .filter(|head| matches!(*head, "loadfile" | "stop" | "quit" | "ao-reload" | "seek"));
+    if let Some(head) = lifecycle {
+        let source = if head == "loadfile" {
+            argv.get(1).map(|url| source_kind(url)).unwrap_or("missing")
+        } else {
+            "none"
+        };
+        crate::log_privacy::record(format!(
+            "[harbor] command session={:p} name={head} source={source} cause=native-call",
+            mpv.ctx.as_ptr()
+        ));
+    }
     let rc = unsafe { libmpv2_sys::mpv_command(mpv.ctx.as_ptr(), ptrs.as_mut_ptr()) };
+    if let Some(head) = lifecycle {
+        crate::log_privacy::record(format!(
+            "[harbor] command-result session={:p} name={head} rc={rc}",
+            mpv.ctx.as_ptr()
+        ));
+    }
     if rc < 0 {
         return Err(format!("mpv_command rc={}", rc));
     }
@@ -1024,6 +1045,18 @@ pub async fn mpv_start(
     state: State<'_, MpvState>,
     args: MpvStartArgs,
 ) -> Result<(), String> {
+    if let Ok(dir) = app.path().app_data_dir() {
+        if let Err(error) = std::fs::create_dir_all(&dir).and_then(|_| {
+            crate::log_privacy::initialize_log(&dir.join("harbor-mpv.log")).map(|_| ())
+        }) {
+            eprintln!("[harbor::mpv] log initialization failed: {error}");
+        }
+    }
+    crate::log_privacy::record(format!(
+        "[harbor] session-request cause=mpv_start live={} embedded={}",
+        args.is_live.unwrap_or(false),
+        args.embed.unwrap_or(false)
+    ));
     #[cfg(windows)]
     let _lifecycle = state.lifecycle.lock().await;
     let want_embed = args.embed.unwrap_or(false);
@@ -1209,6 +1242,7 @@ pub async fn mpv_start(
             format!("mpv init: {}", e)
         };
         eprintln!("[harbor::mpv] init error: {}", msg);
+        crate::log_privacy::record(format!("[harbor] init-error {msg}"));
         msg
     })?;
 
@@ -2178,7 +2212,7 @@ impl ResumeProgress {
 #[cfg(windows)]
 fn trace_resume_fast_sample(
     snapshot: &ResumeObserved,
-    log: &std::sync::mpsc::SyncSender<String>,
+    log: &crate::log_privacy::LogWriter,
     age: Duration,
 ) {
     let _ = log.try_send(format!(
@@ -2199,7 +2233,7 @@ fn trace_resume_fast_sample(
 #[cfg(windows)]
 fn trace_resume_sample(
     snapshot: &ResumeObserved,
-    log: &std::sync::mpsc::SyncSender<String>,
+    log: &crate::log_privacy::LogWriter,
     age: Option<Duration>,
     phase: &str,
     embedded: bool,
@@ -2299,10 +2333,17 @@ fn spawn_event_loop(
     #[cfg(windows)] hdr_monitor: Option<isize>,
 ) {
     std::thread::spawn(move || {
-        let log = app.path().app_data_dir().ok().and_then(|dir| {
-            std::fs::create_dir_all(&dir).ok()?;
-            crate::log_privacy::start_log(&dir.join("harbor-mpv.log")).ok()
-        });
+        crate::log_privacy::record(format!(
+            "[harbor] session-start session={:p}",
+            mpv_keepalive.ctx.as_ptr()
+        ));
+        // Native trace lines share the player log that `record` writes and exports.
+        let log = crate::log_privacy::player_log();
+        let mut last_diagnostic_sample = std::time::Instant::now();
+        let mut diagnostic_position = None;
+        let mut diagnostic_cache = None;
+        let mut log_ipc_window = std::time::Instant::now();
+        let mut log_ipc_count = 0_u32;
         let mut last_timepos: Option<std::time::Instant> = None;
         // Report the negotiated VO output, not just the source HDR transfer.
         // Older mpv builds may not expose all of these properties.
@@ -2594,15 +2635,26 @@ fn spawn_event_loop(
                         ..
                     } = &event
                     {
+                        if text.contains("underrun") {
+                            crate::diagnostics_sessions::native(
+                                "native:audio",
+                                json!({"underrun":true}),
+                            );
+                        } else if text.contains("HTTP/2")
+                            || text.contains("receive failure")
+                            || text.contains("Recv failure")
+                        {
+                            crate::diagnostics_sessions::native(
+                                "native:network",
+                                json!({"error":true,"retry":text.contains("retry")}),
+                            );
+                        }
+                        crate::log_privacy::record(format!(
+                            "[session={:p}] [{prefix}] {level}: {text}",
+                            mpv_keepalive.ctx.as_ptr()
+                        ));
+                        #[cfg(windows)]
                         if let Some(log) = &log {
-                            let wall_ms = std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_millis();
-                            let _ = log.try_send(format!(
-                                "[wall_ms={wall_ms}] [{prefix}] {level}: {text}"
-                            ));
-                            #[cfg(windows)]
                             if let (Some(resumed_at), Some(kind)) = (
                                 resume_trace.last_resumed_at,
                                 resume_warning_kind(prefix, text),
@@ -2637,6 +2689,23 @@ fn spawn_event_loop(
                                         resume_observed.value("current-ao"),
                                     ));
                                 }
+                            }
+                        }
+                        // Underrun storms belong in the file, not in thousands
+                        // of WebView IPC deliveries. Preserve shader/filter
+                        // failures, which drive frontend fallback behavior.
+                        if log_ipc_window.elapsed() >= Duration::from_secs(1) {
+                            log_ipc_window = std::time::Instant::now();
+                            log_ipc_count = 0;
+                        }
+                        let actionable = prefix.contains("vapoursynth")
+                            || prefix.contains("glsl")
+                            || prefix.contains("shader")
+                            || text.contains("Creating filter 'vapoursynth' failed");
+                        if matches!(*level, "fatal" | "error" | "warn") && !actionable {
+                            log_ipc_count = log_ipc_count.saturating_add(1);
+                            if log_ipc_count > 10 {
+                                continue;
                             }
                         }
                     }
@@ -2865,6 +2934,62 @@ fn spawn_event_loop(
                     phase.store(6, std::sync::atomic::Ordering::Relaxed);
                     let payload = event_to_payload(event);
                     if let Some(p) = payload {
+                        let name = p.get("name").and_then(Value::as_str).unwrap_or("");
+                        let kind = p.get("event").and_then(Value::as_str).unwrap_or("");
+                        if name == "time-pos" {
+                            diagnostic_position = p["data"].as_f64();
+                        }
+                        if name == "demuxer-cache-duration" {
+                            diagnostic_cache = p["data"].as_f64();
+                        }
+                        let state_transition = kind != "property-change" && kind != "log";
+                        let property_transition = matches!(
+                            name,
+                            "pause" | "paused-for-cache" | "eof-reached" | "audio-device-list"
+                        );
+                        let sample = name == "time-pos"
+                            && last_diagnostic_sample.elapsed() >= Duration::from_secs(5);
+                        if state_transition || property_transition || sample {
+                            let event_code = match kind {
+                                "file-loaded" => 1,
+                                "playback-restart" => 2,
+                                "seek" => 3,
+                                "end-file" => 4,
+                                "shutdown" => 5,
+                                _ => 0,
+                            };
+                            let reason = match p.get("reason").and_then(Value::as_str).unwrap_or("")
+                            {
+                                "eof" => 0,
+                                "stop" => 2,
+                                "quit" => 3,
+                                "error" => 4,
+                                "redirect" => 5,
+                                _ => -1,
+                            };
+                            let fields = json!({"position":diagnostic_position,"cache":diagnostic_cache,
+                                "event":event_code,"reason":reason,"paused":if name=="pause"{p["data"].as_bool()}else{None},
+                                "buffering":if name=="paused-for-cache"{p["data"].as_bool()}else{None}});
+                            crate::diagnostics_sessions::native(
+                                if sample {
+                                    "native:position"
+                                } else if name == "paused-for-cache" {
+                                    "native:buffering"
+                                } else {
+                                    "native:lifecycle"
+                                },
+                                fields,
+                            );
+                            let detail = if name == "audio-device-list" {
+                                format!("device-count={}", p["data"].as_array().map_or(0, Vec::len))
+                            } else {
+                                p.to_string()
+                            };
+                            crate::log_privacy::record(format!("[harbor] event session={:p} position={diagnostic_position:?} cache-seconds={diagnostic_cache:?} {detail}", mpv_keepalive.ctx.as_ptr()));
+                            if sample {
+                                last_diagnostic_sample = std::time::Instant::now();
+                            }
+                        }
                         let _ = app.emit("mpv://event", p);
                     }
                     if shutdown {
@@ -2882,6 +3007,11 @@ fn spawn_event_loop(
                             delay.map(|value| value.as_millis()).unwrap_or(0),
                         ));
                     }
+                    crate::log_privacy::record(format!(
+                        "[harbor] event-error session={:p} consecutive={} error={e}",
+                        mpv_keepalive.ctx.as_ptr(),
+                        error_backoff.consecutive
+                    ));
                     if error_backoff.consecutive == 1 || error_backoff.consecutive.is_power_of_two()
                     {
                         eprintln!(
@@ -2917,6 +3047,10 @@ fn spawn_event_loop(
             watch_playing.store(false, std::sync::atomic::Ordering::Relaxed);
             watch_running.store(false, std::sync::atomic::Ordering::Relaxed);
         }
+        crate::log_privacy::record(format!(
+            "[harbor] session-end session={:p}",
+            mpv_keepalive.ctx.as_ptr()
+        ));
         drop(mpv_keepalive);
     });
 }
@@ -3138,12 +3272,30 @@ pub async fn mpv_set_property(
         return Err(format!("mpv property not allowed: {}", name));
     }
     let str_val = value_to_arg(&value);
+    if matches!(name.as_str(), "pause" | "audio-device" | "aid" | "af") {
+        let detail = if name == "audio-device" {
+            "endpoint-selected".into()
+        } else if name == "af" {
+            "filters-updated".into()
+        } else {
+            str_val.clone()
+        };
+        crate::log_privacy::record(format!(
+            "[harbor] set-property session={:p} name={name} value={detail} cause=frontend",
+            mpv.ctx.as_ptr()
+        ));
+    }
     let audio_switch = name == "aid"
         && str_val != "no"
         && !is_live
         && mpv.get_property::<String>("aid").ok().as_deref() != Some(str_val.as_str());
-    mpv.set_property(&name, str_val.as_str())
-        .map_err(|e| format!("set {}: {}", name, e))?;
+    mpv.set_property(&name, str_val.as_str()).map_err(|e| {
+        crate::log_privacy::record(format!(
+            "[harbor] property-error session={:p} name={name} error={e}",
+            mpv.ctx.as_ptr()
+        ));
+        format!("set {}: {}", name, e)
+    })?;
     // With a large demuxer readahead (Harbor's steady-state buffer), mpv holds
     // the newly selected audio until the cache drains when its refresh seek
     // cannot be issued (mpv-player/mpv#18371), leaving minutes of silence. The
@@ -3371,22 +3523,26 @@ pub async fn mpv_set_geometry(
 }
 
 #[tauri::command]
-pub fn mpv_export_log(app: AppHandle) -> Result<String, String> {
-    use tauri::Manager;
-    let src = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("harbor-mpv.log");
-    if !src.exists() {
-        return Err("No player log yet. Play something first, then export.".into());
-    }
-    let dl = app.path().download_dir().map_err(|e| e.to_string())?;
-    let dst = dl.join("harbor-mpv-log.txt");
-    let raw = std::fs::read(&src).map_err(|e| format!("read: {}", e))?;
-    let scrubbed = crate::log_privacy::scrub(&String::from_utf8_lossy(&raw));
-    std::fs::write(&dst, scrubbed).map_err(|e| format!("write: {}", e))?;
-    Ok(dst.to_string_lossy().into_owned())
+pub async fn mpv_export_log(
+    app: AppHandle,
+    runtime_text: Option<String>,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = app.path().app_data_dir().map_err(|e| e.to_string())?;
+        let src = directory.join("harbor-mpv.log");
+        if !src.exists() && runtime_text.is_none() {
+            return Err("No player log yet. Play something first, then export.".into());
+        }
+        std::fs::create_dir_all(&directory).map_err(|e| format!("log directory: {e}"))?;
+        let writer = crate::log_privacy::initialize_log(&src).map_err(|e| format!("log: {e}"))?;
+        let dl = app.path().download_dir().map_err(|e| e.to_string())?;
+        std::fs::create_dir_all(&dl).map_err(|e| format!("Downloads: {e}"))?;
+        let dst = dl.join(format!("harbor-mpv-log-{}.txt", Uuid::new_v4()));
+        writer.export(dst.clone(), runtime_text)?;
+        Ok(dst.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| format!("log export task: {e}"))?
 }
 
 #[tauri::command]
@@ -4623,6 +4779,7 @@ async fn detach_native_hdr(app: &AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 pub async fn mpv_stop(app: AppHandle, state: State<'_, MpvState>) -> Result<(), String> {
+    crate::log_privacy::record("[harbor] stop-request cause=mpv_stop".into());
     #[cfg(windows)]
     let _lifecycle = state.lifecycle.lock().await;
     let mut g = state.inner.lock().await;
@@ -4688,6 +4845,7 @@ pub async fn mpv_stop(app: AppHandle, state: State<'_, MpvState>) -> Result<(), 
 
 #[tauri::command]
 pub async fn mpv_release_media(app: AppHandle, state: State<'_, MpvState>) -> Result<bool, String> {
+    crate::log_privacy::record("[harbor] stop-request cause=release-retained-media".into());
     #[cfg(windows)]
     {
         let (mpv, embedded) = {

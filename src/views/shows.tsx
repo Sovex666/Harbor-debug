@@ -30,9 +30,10 @@ import {
   ANIME_CLOUD_ID,
   isAnimeCwItem,
   isCwMember,
-  library,
   type LibraryItem,
 } from "@/lib/stremio";
+import { readLibraryProjection } from "@/lib/library-read-cache";
+import { activeScopedProfileId } from "@/lib/active-profile-id";
 import { listLocalCw, localCwVersion, subscribeLocalCw } from "@/lib/local-cw";
 import { localToLibraryItem } from "@/lib/continue-watching";
 import {
@@ -47,6 +48,8 @@ import { useScrollMemory } from "@/lib/view";
 import { buildShowHero, bucketCopy } from "./shows/hero-curation";
 import { showSpecs } from "./shows/show-specs";
 import { useCollectionRowsForPage } from "@/lib/page-collection-rows";
+import { replaceCatalogFirstPage } from "@/lib/catalog-page-refresh";
+import { useBrowseCacheUpdates } from "@/hooks/use-browse-cache-updates";
 
 const HERO_POOL_TARGET = 6;
 const MAX_PER_ROW = 30;
@@ -58,12 +61,14 @@ type ShowRow = {
   page: number;
   hasMore: boolean;
   fetcher?: (page: number) => Promise<Meta[]>;
+  firstPageLength?: number;
   variant?: "rank";
 };
 
 export function Shows({ active = true }: { active?: boolean }) {
+  const loadedScope = useRef<string | null>(null);
   const { settings } = useSettings();
-  const { authKey } = useAuth();
+  const { authKey, user } = useAuth();
   const { activeProfile, profiles } = useProfiles();
   const hideSharedCw =
     settings.cwPerProfile && anyProfileSharesStremioWith(activeProfile, profiles);
@@ -77,6 +82,14 @@ export function Shows({ active = true }: { active?: boolean }) {
   const loadingRef = useRef<Set<string>>(new Set());
   const scrollRef = useRef<HTMLElement>(null);
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+  const browseRevision = useBrowseCacheUpdates(active);
+  const catalogScope = JSON.stringify([
+    settings.tmdbKey,
+    settings.tmdbLanguage,
+    authKey,
+    user?._id,
+    activeProfile?.id,
+  ]);
 
   useEffect(() => {
     rowsRef.current = rows;
@@ -90,19 +103,32 @@ export function Shows({ active = true }: { active?: boolean }) {
   }, []);
 
   useEffect(() => {
+    let cancelled = false;
+    setItems([]);
     if (!authKey) {
-      setItems([]);
       return;
     }
-    library(authKey)
-      .then(setItems)
+    readLibraryProjection({ authKey, userId: user?._id, profileId: activeScopedProfileId() })
+      .then(({ value, refresh }) => {
+        if (!cancelled && value) setItems(value);
+        void refresh?.then((rows) => {
+          if (!cancelled && rows) setItems(rows);
+        });
+      })
       .catch(() => {});
-  }, [authKey]);
+    return () => {
+      cancelled = true;
+    };
+  }, [authKey, user?._id, activeProfile?.id]);
 
   useEffect(() => {
     let cancelled = false;
-    setHero([]);
-    setRows([]);
+    if (loadedScope.current !== catalogScope) {
+      loadedScope.current = catalogScope;
+      rowsRef.current = [];
+      setHero([]);
+      setRows([]);
+    }
     (async () => {
       if (settings.tmdbKey) {
         const specs = showSpecs(settings.tmdbKey);
@@ -119,12 +145,21 @@ export function Shows({ active = true }: { active?: boolean }) {
             const row: ShowRow = {
               key: spec.key,
               title: spec.title,
-              metas,
+              metas: metas.slice(0, MAX_PER_ROW),
               page: 1,
               hasMore: !spec.noPaginate && metas.length >= 14,
               fetcher: spec.noPaginate ? undefined : spec.fetcher,
+              firstPageLength: spec.noPaginate ? undefined : Math.min(metas.length, MAX_PER_ROW),
             };
-            startTransition(() => setRows((current) => upsertOrdered(current, row, order)));
+            const normalized =
+              row.firstPageLength == null
+                ? row
+                : replaceCatalogFirstPage(
+                    { ...row, metas: [], firstPageLength: 0 },
+                    metas,
+                    MAX_PER_ROW,
+                  );
+            startTransition(() => setRows((current) => upsertOrdered(current, normalized, order)));
             return true;
           }),
         );
@@ -183,7 +218,31 @@ export function Shows({ active = true }: { active?: boolean }) {
     return () => {
       cancelled = true;
     };
-  }, [settings.tmdbKey]);
+  }, [catalogScope]);
+
+  useEffect(() => {
+    if (!active) return;
+    const snapshot = rowsRef.current.filter((row) => row.firstPageLength != null && row.fetcher);
+    if (snapshot.length === 0) return;
+    let cancelled = false;
+    for (const row of snapshot) {
+      void withTimeout(row.fetcher!(1), CATALOG_REQUEST_TIMEOUT_MS)
+        .then((first) => {
+          if (cancelled || loadedScope.current !== catalogScope || first.length === 0) return;
+          setRows((current) =>
+            current.map((currentRow) =>
+              currentRow.key === row.key && currentRow.firstPageLength != null
+                ? replaceCatalogFirstPage(currentRow, first, MAX_PER_ROW)
+                : currentRow,
+            ),
+          );
+        })
+        .catch(() => {});
+    }
+    return () => {
+      cancelled = true;
+    };
+  }, [active, browseRevision, catalogScope]);
 
   const localCwVer = useSyncExternalStore(subscribeLocalCw, localCwVersion);
   const continueWatching = useMemo(
@@ -238,14 +297,20 @@ export function Shows({ active = true }: { active?: boolean }) {
     if (!row || !row.fetcher || !row.hasMore || row.metas.length >= MAX_PER_ROW) return;
     loadingRef.current.add(rowKey);
     const next = row.page + 1;
+    const scope = loadedScope.current;
     row
       .fetcher(next)
       .then((more) => {
+        if (loadedScope.current !== scope) return;
         setRows((rs) =>
           rs.map((r) => {
             if (r.key !== rowKey) return r;
             const ids = new Set(r.metas.map((m) => m.id));
-            const fresh = more.filter((m) => !ids.has(m.id));
+            const fresh = more.filter((m) => {
+              if (ids.has(m.id)) return false;
+              ids.add(m.id);
+              return true;
+            });
             const combined = [...r.metas, ...fresh];
             const reachedCap = combined.length >= MAX_PER_ROW;
             return {

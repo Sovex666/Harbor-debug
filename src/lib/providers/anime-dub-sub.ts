@@ -40,16 +40,18 @@ function notifySubscribers(): void {
 }
 
 /** Fetch the AniSchedule dub feed, cached briefly. Never rejects. */
-export async function fetchDubSchedule(): Promise<DubFeedEntry[]> {
+export async function fetchDubSchedule(strict = false): Promise<DubFeedEntry[]> {
   const now = Date.now();
   if (feedCache && now - feedCache.at < FEED_STALE_MS) return feedCache.entries;
   try {
     const res = await safeFetch(FEED_URL);
-    if (!res.ok) return feedCache?.entries ?? [];
+    if (!res.ok) throw new Error("Dub schedule request failed");
     const arr = (await res.json()) as DubFeedEntry[];
+    if (!Array.isArray(arr)) throw new Error("Invalid dub schedule response");
     feedCache = { entries: arr, at: now };
     return arr;
-  } catch {
+  } catch (error) {
+    if (strict) throw error;
     return feedCache?.entries ?? [];
   }
 }

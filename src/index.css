@@ -564,6 +564,11 @@ main[data-kids="on"]::-webkit-scrollbar-thumb:hover {
 }
 
 @layer base {
+  /* Home/Discover layer roots keep pointer-events:none in both states so parking never flips an
+     inherited property; their content opts back in here (base layer, so any utility still wins). */
+  .harbor-park-layer > * {
+    pointer-events: auto;
+  }
   button {
     font: inherit;
     color: inherit;
@@ -8065,4 +8070,149 @@ button.hset-rail-me:hover,
 
 [data-profile-ui~="glass"] [data-profile-solid="elevated"] {
   background-color: var(--profile-elevated-solid, var(--color-elevated));
+}
+
+/* A nav item marked by a mouse click, before its view switches. Each rule copies the look its theme
+ * gives the active item, so the click reads the same before and after the switch. The mark value
+ * picks the rule: "" and "collapsed" for the sidebar, "shell" for injected theme chrome. */
+[data-harbor-nav][data-nav-pending=""],
+[data-harbor-nav][data-nav-pending="collapsed"],
+[data-harbor-nav][data-nav-pending="topdock"],
+[data-harbor-nav][data-nav-pending="shell"] {
+  background-color: var(--color-accent-soft) !important;
+  color: var(--color-accent) !important;
+  box-shadow: inset 0 0 0 var(--ef-border-w) color-mix(in srgb, var(--color-accent) 55%, transparent) !important;
+}
+
+/* Cinematic and Royal draw the active look as a pseudo-element behind the label. */
+[data-harbor-nav][data-nav-pending="cinematic"] {
+  color: var(--color-ink) !important;
+}
+
+[data-harbor-nav][data-nav-pending="cinematic"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 9999px;
+  background: rgb(255 255 255 / 0.15);
+  box-shadow:
+    inset 0 0 0 1px rgb(255 255 255 / 0.25),
+    inset 0 1px 0 rgb(255 255 255 / 0.35),
+    0 4px 12px -2px rgb(0 0 0 / 0.3);
+}
+
+[data-harbor-nav][data-nav-pending="royal"] {
+  color: var(--color-accent) !important;
+}
+
+[data-harbor-nav][data-nav-pending="royal"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: 0.375rem;
+  background: var(--color-accent-soft);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--color-accent) 22%, transparent);
+}
+
+/* Dracula, Forest, Nord, Stremio, Siderail and MinUI draw the active look in JSX, so each rule
+ * reproduces that markup with the item's own pseudo-elements and child selectors. */
+[data-nav-pending="dracula"] {
+  color: var(--color-accent) !important;
+}
+
+[data-nav-pending="dracula"]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 18px;
+  background: var(--color-accent-soft);
+  box-shadow:
+    inset 0 0 0 1px var(--color-accent-soft),
+    0 6px 20px -14px var(--color-accent);
+}
+
+[data-nav-pending="forest"] {
+  color: var(--color-accent) !important;
+}
+
+[data-nav-pending="forest"]::before {
+  content: "";
+  position: absolute;
+  inset-block: 0;
+  inset-inline: -0.25rem 0.5rem;
+  background: radial-gradient(70% 140% at 18% 50%, oklch(0.8 0.15 145 / 0.22), transparent 72%);
+}
+
+[data-nav-pending="forest"]:dir(rtl)::before {
+  background: radial-gradient(70% 140% at 82% 50%, oklch(0.8 0.15 145 / 0.22), transparent 72%);
+}
+
+[data-nav-pending="nord"] > span > span {
+  color: var(--color-canvas) !important;
+}
+
+[data-nav-pending="nord"] > span > span > span:first-child {
+  display: none;
+}
+
+[data-nav-pending="nord"] > span > span::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  background: #88c0d0;
+  box-shadow: 0 0 0 4px #88c0d01c, 0 0 16px 1px #88c0d073;
+}
+
+[data-nav-pending="nord"] > span:last-child {
+  font-weight: 600;
+  color: var(--color-ink);
+}
+
+[data-nav-pending="stremio"] {
+  color: var(--color-accent) !important;
+  background-color: transparent !important;
+}
+
+[data-nav-pending="stremio"] > span:last-child {
+  opacity: 1 !important;
+}
+
+[data-nav-pending="siderail"] {
+  color: var(--color-accent) !important;
+}
+
+[data-nav-pending="siderail"] > span:first-child {
+  opacity: 1 !important;
+  background: var(--color-accent-soft) !important;
+}
+
+[data-nav-pending="siderail"]::after {
+  content: "";
+  position: absolute;
+  inset-inline-start: 0;
+  top: 50%;
+  height: 1.25rem;
+  width: 3px;
+  transform: translateY(-50%);
+  border-start-end-radius: 9999px;
+  border-end-end-radius: 9999px;
+  background: var(--color-accent);
+  box-shadow: 0 0 12px 0 var(--color-accent);
+}
+
+[data-nav-pending="minui"] {
+  background: var(--color-accent) !important;
+  color: #fff !important;
+  border-color: transparent !important;
+  box-shadow:
+    0 10px 24px -10px var(--color-accent-soft),
+    inset 0 1px 0 rgba(255, 255, 255, 0.22) !important;
+}
+
+[data-nav-pending="minui"] + span {
+  opacity: 1 !important;
+  transform: scale(1) !important;
 }

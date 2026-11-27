@@ -48,6 +48,21 @@ function deferred() {
   return { promise, resolve };
 }
 
+test("warming browse pages does not scan the disk index for every write", async () => {
+  let scans = 0;
+  const f = fixture();
+  const list = f.store.list;
+  f.store.list = async () => {
+    scans++;
+    return list();
+  };
+  for (let page = 0; page < 24; page++) {
+    await f.cache.save(`v1:browse-catalog:${page}`, { results: [page] }, {});
+  }
+  assert.ok(scans <= 2, `24 warm pages caused ${scans} full disk index scans`);
+  assert.equal(f.records.size, 24);
+});
+
 test("persistent snapshots survive restart and cannot be changed by callers", async () => {
   const f = fixture();
   const first = await f.cache.load("show", async () => ({ episodes: [1, 2] }));

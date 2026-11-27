@@ -1,4 +1,12 @@
-import { startTransition, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  startTransition,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type SetStateAction,
+} from "react";
 import { BackToTop } from "@/components/back-to-top";
 import { LazyMount } from "@/components/lazy-mount";
 import { CollectionsRow } from "@/components/collections-row";
@@ -31,11 +39,21 @@ import {
 import type { FeaturedItem } from "@/lib/feed/featured/types";
 import { prewarmExternalWatched, subscribeExternalWatched } from "@/lib/feed/external-watched";
 import { getStore, subscribe as subscribeTaste } from "@/lib/discover/store";
+import {
+  acquireDiscoverSession,
+  commitSessionUpdate,
+  startDiscoverSession,
+  subscribeDiscoverSession,
+  type DiscoverSession,
+  type SessionField,
+} from "@/lib/discover/session";
+import { dayIndex } from "@/lib/feed/tags";
 import { getDownvotedIds, getUpvotedIds, subscribePrefs } from "@/lib/feed/preferences";
 import { recentlyPlayed, subscribePlayback, watchTitleKey } from "@/lib/playback-history";
 import { useSettings } from "@/lib/settings";
 import { useContentDrag } from "@/lib/window-drag";
 import { useScrollMemory } from "@/lib/view";
+import { recordDiagnostic } from "@/lib/perf/diagnostics";
 import { useLetterboxd } from "@/lib/stremboxd/provider";
 import { buildLetterboxdHomeRows } from "@/lib/stremboxd/home-rails";
 import { CuratedListRow } from "@/components/curated-list-row";
@@ -66,6 +84,9 @@ import {
 const MAX_RAIL_PAGES = 10;
 const MIN_PAGE_YIELD = 4;
 const ROW_COUNT = 14;
+// Rails mount in idle batches so a return to Discover paints its first rows at once.
+const INITIAL_REVEALED_RAILS = 8;
+const REVEAL_BATCH = 8;
 const DEDUP_PRIORITY = [ANCHOR_TOP_RATED, ANCHOR_AWARDS];
 
 type RowItem = { key: string; title: string };
@@ -88,6 +109,13 @@ const SPECIAL_ROWS: Array<RowItem & { after: number }> = [
 
 const isSpecialRow = (key: string) => key.startsWith("special:");
 
+const sameIds = (a: Meta[], b: Meta[]) =>
+  a.length === b.length && a.every((m, i) => m.id === b[i]?.id);
+// Rescoring rebuilds every object even when the order held, which re-renders each rail. Keeping the
+// previous result when the ids match skips that work.
+const sameFeatured = (a: FeaturedResult, b: FeaturedResult) =>
+  sameIds(a.featured, b.featured) && sameIds(a.reserve, b.reserve);
+
 export function Discover({ active = true }: { active?: boolean }) {
   const scrollRef = useRef<HTMLElement>(null);
   const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
@@ -96,22 +124,114 @@ export function Discover({ active = true }: { active?: boolean }) {
     setScrollEl(el);
   }, []);
   useScrollMemory("discover", scrollRef, active);
+  // The view name is in the event name because diagnostic fields only accept numbers and booleans.
+  useEffect(() => {
+    recordDiagnostic("view:discover:mount");
+  }, []);
 
   const { settings } = useSettings();
   const contentDrag = useContentDrag();
   const letterboxd = useLetterboxd();
   const t = useT();
   const pageRows = usePageRows("discover");
-  const [feat, setFeat] = useState<FeaturedResult>({ featured: [], reserve: [], pool: [] });
-  const [featReady, setFeatReady] = useState(false);
+  const [tasteVersion, setTasteVersion] = useState(0);
+  const [letterboxdRows, setLetterboxdRows] = useState<HomeRow[]>([]);
+
+  const dailyRows = useMemo(
+    () => selectDailyRows(settings.tmdbKey, getStore().affinity, settings, ROW_COUNT),
+    [
+      settings.tmdbKey,
+      settings.region,
+      settings.streaming,
+      settings.preferredLanguages,
+      settings.tmdbLanguage,
+      settings.feedLocaleBias,
+      settings.uiLanguage,
+      tasteVersion,
+    ],
+  );
+  const rowSig = useMemo(() => dailyRows.map((r) => r.id).join("|"), [dailyRows]);
+
+  // The rail keys below plus the feed-locale keys and the day. The day matters on a rebuild: the
+  // daily rows rotate at midnight, so a cached session from yesterday must not be reused.
+  const featKey = [
+    settings.tmdbKey,
+    settings.tmdbLanguage,
+    settings.region,
+    settings.feedLocaleBias,
+    (settings.preferredLanguages ?? []).join(","),
+  ].join("|");
+  const sessionKey = [
+    dayIndex(),
+    rowSig,
+    settings.tmdbKey,
+    settings.region,
+    JSON.stringify(settings.streaming),
+    settings.tmdbLanguage,
+    featKey,
+  ].join("|");
+  const sessionRef = useRef<DiscoverSession | null>(null);
+  if (!sessionRef.current) sessionRef.current = acquireDiscoverSession(sessionKey);
+  const session = sessionRef.current;
+  const [feat, setFeatState] = useState(session.feat);
+  const [featReady, setFeatReadyState] = useState(session.featReady);
+  const [queue, setQueueState] = useState(session.queue);
+  const [criticsPickList, setCriticsPickListState] = useState(session.criticsPickList);
+  const [rails, setRailsState] = useState(session.rails);
   const featured = feat.featured;
   const poolRef = useRef<FeaturedItem[]>([]);
   poolRef.current = feat.pool;
-  const [queue, setQueue] = useState<FeedItem[]>([]);
-  const [criticsPickList, setCriticsPickList] = useState<Meta[]>([]);
-  const [tasteVersion, setTasteVersion] = useState(0);
-  const [rails, setRails] = useState<Record<string, Meta[]>>({});
-  const [letterboxdRows, setLetterboxdRows] = useState<HomeRow[]>([]);
+
+  // Every write goes to the session first and then to the views that are still mounted, so a
+  // fetch that resolves after unmount still reaches the cache.
+  const writeSession = useCallback(
+    <K extends SessionField>(field: K, update: SetStateAction<DiscoverSession[K]>) => {
+      const s = sessionRef.current;
+      if (s) commitSessionUpdate(s, field, update);
+    },
+    [],
+  );
+  const setFeat = useCallback(
+    (u: SetStateAction<FeaturedResult>) => writeSession("feat", u),
+    [writeSession],
+  );
+  const setFeatReady = useCallback(
+    (u: SetStateAction<boolean>) => writeSession("featReady", u),
+    [writeSession],
+  );
+  const setQueue = useCallback(
+    (u: SetStateAction<FeedItem[]>) => writeSession("queue", u),
+    [writeSession],
+  );
+  const setCriticsPickList = useCallback(
+    (u: SetStateAction<Meta[]>) => writeSession("criticsPickList", u),
+    [writeSession],
+  );
+  const setRails = useCallback(
+    (u: SetStateAction<Record<string, Meta[]>>) => writeSession("rails", u),
+    [writeSession],
+  );
+  useEffect(
+    () =>
+      subscribeDiscoverSession(() => {
+        const s = sessionRef.current;
+        if (!s) return;
+        setFeatState(s.feat);
+        setFeatReadyState(s.featReady);
+        setQueueState(s.queue);
+        setCriticsPickListState(s.criticsPickList);
+        setRailsState(s.rails);
+      }),
+    [],
+  );
+  // A changed feed key starts the featured set over. An unchanged one keeps the cached set.
+  const featKeyRef = useRef(featKey);
+  useEffect(() => {
+    if (featKeyRef.current === featKey) return;
+    featKeyRef.current = featKey;
+    setFeatReady(false);
+    setFeat({ featured: [], reserve: [], pool: [] });
+  }, [featKey, setFeat, setFeatReady]);
 
   useEffect(() => {
     if (!letterboxd.isActive) {
@@ -152,33 +272,17 @@ export function Discover({ active = true }: { active?: boolean }) {
     letterboxd.session,
     letterboxd.listRefs,
   ]);
-  const railPagesRef = useRef<Record<string, number>>({});
-  const railExhaustedRef = useRef<Record<string, boolean>>({});
+  // These refs hold the session's own objects, so writing through a ref writes the session.
+  const railPagesRef = useRef(session.pages);
+  const railExhaustedRef = useRef(session.exhausted);
   const railLoadingRef = useRef<Record<string, boolean>>({});
   const [epoch, setEpoch] = useState(0);
   const epochRef = useRef(0);
   epochRef.current = epoch;
 
-  const dailyRows = useMemo(
-    () => selectDailyRows(settings.tmdbKey, getStore().affinity, settings, ROW_COUNT),
-    [
-      settings.tmdbKey,
-      settings.region,
-      settings.streaming,
-      settings.preferredLanguages,
-      settings.tmdbLanguage,
-      settings.feedLocaleBias,
-      settings.uiLanguage,
-      tasteVersion,
-    ],
-  );
-  const rowSig = useMemo(() => dailyRows.map((r) => r.id).join("|"), [dailyRows]);
-
   useEffect(() => {
     let cancelled = false;
     let full = false;
-    setFeatReady(false);
-    setFeat({ featured: [], reserve: [], pool: [] });
     const fastDone = buildFeaturedFast(settings.tmdbKey, settings)
       .then((r) => {
         if (!cancelled && !full) setFeat(rescoreFeatured(r.pool));
@@ -216,6 +320,8 @@ export function Discover({ active = true }: { active?: boolean }) {
     settings.region,
     settings.feedLocaleBias,
     settings.preferredLanguages,
+    setFeat,
+    setFeatReady,
   ]);
 
   useEffect(() => {
@@ -239,6 +345,8 @@ export function Discover({ active = true }: { active?: boolean }) {
     settings.preferredLanguages,
     settings.tmdbLanguage,
     tasteVersion,
+    setQueue,
+    setCriticsPickList,
   ]);
 
   useEffect(() => {
@@ -269,8 +377,14 @@ export function Discover({ active = true }: { active?: boolean }) {
     const offPrefs = subscribePrefs(() => {
       rescore();
       const blocked = new Set<string>([...getDownvotedIds(), ...getUpvotedIds()]);
-      setQueue((prev) => prev.filter((it) => !blocked.has(it.meta.id)));
-      setCriticsPickList((prev) => prev.filter((m) => !blocked.has(m.id)));
+      setQueue((prev) => {
+        const next = prev.filter((it) => !blocked.has(it.meta.id));
+        return next.length === prev.length ? prev : next;
+      });
+      setCriticsPickList((prev) => {
+        const next = prev.filter((m) => !blocked.has(m.id));
+        return next.length === prev.length ? prev : next;
+      });
       bump();
     });
     const offPlayback = subscribePlayback(() => {
@@ -286,20 +400,41 @@ export function Discover({ active = true }: { active?: boolean }) {
       offPlayback();
       offExternal();
     };
-  }, []);
+  }, [setFeat, setQueue, setCriticsPickList]);
 
   useEffect(() => {
     if (!active) return;
-    startTransition(() => {
-      setFeat((prev) => (prev.pool.length ? rescoreFeatured(prev.pool) : prev));
-      const watched = recentlyPlayed();
-      if (watched.ids.size === 0 && watched.titles.size === 0) return;
-      const isWatched = (m: Meta) =>
-        watched.ids.has(m.id) || watched.titles.has(watchTitleKey(m.name));
-      setQueue((prev) => prev.filter((it) => !isWatched(it.meta)));
-      setCriticsPickList((prev) => prev.filter((m) => !isWatched(m)));
+    // Runs after the frame that shows the tab, so the switch paints before this work starts.
+    // Cleanup cancels it if the user leaves again first.
+    let timer = 0;
+    const raf = requestAnimationFrame(() => {
+      timer = window.setTimeout(() => {
+        startTransition(() => {
+          setFeat((prev) => {
+            if (!prev.pool.length) return prev;
+            const next = rescoreFeatured(prev.pool);
+            return sameFeatured(prev, next) ? prev : next;
+          });
+          const watched = recentlyPlayed();
+          if (watched.ids.size === 0 && watched.titles.size === 0) return;
+          const isWatched = (m: Meta) =>
+            watched.ids.has(m.id) || watched.titles.has(watchTitleKey(m.name));
+          setQueue((prev) => {
+            const next = prev.filter((it) => !isWatched(it.meta));
+            return next.length === prev.length ? prev : next;
+          });
+          setCriticsPickList((prev) => {
+            const next = prev.filter((m) => !isWatched(m));
+            return next.length === prev.length ? prev : next;
+          });
+        });
+      }, 0);
     });
-  }, [active]);
+    return () => {
+      cancelAnimationFrame(raf);
+      clearTimeout(timer);
+    };
+  }, [active, setFeat, setQueue, setCriticsPickList]);
 
   const ensureLoaded = useCallback(
     (railId: string) => {
@@ -324,7 +459,7 @@ export function Discover({ active = true }: { active?: boolean }) {
           if (epochRef.current === myEpoch) railLoadingRef.current[railId] = false;
         });
     },
-    [dailyRows, epoch],
+    [dailyRows, epoch, setRails],
   );
 
   const ensureLoadedRef = useRef(ensureLoaded);
@@ -336,9 +471,12 @@ export function Discover({ active = true }: { active?: boolean }) {
       didInitRef.current = true;
       return;
     }
+    // StrictMode re-runs effects on mount, and an unchanged key means the cached rows still apply.
+    if (sessionRef.current?.key === sessionKey) return;
+    sessionRef.current = startDiscoverSession(sessionKey);
     setRails({});
-    railPagesRef.current = {};
-    railExhaustedRef.current = {};
+    railPagesRef.current = sessionRef.current.pages;
+    railExhaustedRef.current = sessionRef.current.exhausted;
     railLoadingRef.current = {};
     epochRef.current += 1;
     setEpoch(epochRef.current);
@@ -377,7 +515,7 @@ export function Discover({ active = true }: { active?: boolean }) {
           if (epochRef.current === myEpoch) railLoadingRef.current[railId] = false;
         });
     },
-    [dailyRows, epoch],
+    [dailyRows, epoch, setRails],
   );
 
   const featuredIds = useMemo(() => new Set(featured.map((m) => m.id)), [featured]);
@@ -431,6 +569,52 @@ export function Discover({ active = true }: { active?: boolean }) {
     () => applyPageRows(railItems, pageRows.custom, false),
     [railItems, pageRows.custom],
   );
+  const [revealedRails, setRevealedRails] = useState(INITIAL_REVEALED_RAILS);
+  const revealTotal = visibleRails.length;
+  useEffect(() => {
+    if (!active || pageRows.editMode || revealedRails >= revealTotal) return;
+    const win = window as Window & {
+      requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
+      cancelIdleCallback?: (handle: number) => void;
+    };
+    const idle = typeof win.requestIdleCallback === "function";
+    const grow = () =>
+      startTransition(() => setRevealedRails((n) => Math.min(n + REVEAL_BATCH, revealTotal)));
+    const handle = idle
+      ? win.requestIdleCallback!(grow, { timeout: 2500 })
+      : window.setTimeout(grow, 1200);
+    return () => {
+      if (idle) win.cancelIdleCallback?.(handle);
+      else window.clearTimeout(handle);
+    };
+  }, [active, pageRows.editMode, revealedRails, revealTotal]);
+  // Un-hiding the full page is what froze returns, so a parked Discover keeps only its first rows.
+  // The wait lets the destination view paint before the rows unmount.
+  useEffect(() => {
+    if (active) return;
+    const timer = window.setTimeout(
+      () => startTransition(() => setRevealedRails(INITIAL_REVEALED_RAILS)),
+      300,
+    );
+    return () => window.clearTimeout(timer);
+  }, [active]);
+  // User input can reach rows that are not mounted yet, so they all mount then. `scroll` is not
+  // listened to: returning to Discover scrolls it to the top programmatically, which would undo the reveal.
+  useEffect(() => {
+    if (!scrollEl || !active) return;
+    const inputEvents = ["wheel", "pointerdown", "touchstart", "keydown"] as const;
+    const revealAll = () => {
+      for (const type of inputEvents) scrollEl.removeEventListener(type, revealAll);
+      startTransition(() => setRevealedRails(Infinity));
+    };
+    scrollEl.addEventListener("wheel", revealAll, { passive: true });
+    scrollEl.addEventListener("pointerdown", revealAll, { passive: true });
+    scrollEl.addEventListener("touchstart", revealAll, { passive: true });
+    scrollEl.addEventListener("keydown", revealAll);
+    return () => {
+      for (const type of inputEvents) scrollEl.removeEventListener(type, revealAll);
+    };
+  }, [scrollEl, active]);
   const editRails = useMemo(
     () =>
       applyPageRows(railItems, pageRows.custom, true).filter((item) => {
@@ -644,7 +828,7 @@ export function Discover({ active = true }: { active?: boolean }) {
                   </div>
                 );
               })
-            : visibleRails.map((item) => {
+            : visibleRails.slice(0, revealedRails).map((item) => {
                 const row = renderRow(item);
                 if (!isSpecialRow(item.key)) return row;
                 return row ? (

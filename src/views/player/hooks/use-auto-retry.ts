@@ -33,6 +33,7 @@ import {
   STUCK_AUTORETRY_MS,
 } from "../player-utils";
 import { GENUINE_FAILURE_WINDOW_MS, type EngineStats } from "@/lib/torrent/engine-stats";
+import { tracePlayback } from "@/lib/player/pause-trace";
 
 type OpenPicker = (meta: Meta, episode?: PlayEpisode, opts?: PickerOptions) => void;
 
@@ -217,6 +218,7 @@ export function useAutoRetry(params: {
       () => {
         liveRetryCountRef.current = attempt;
         console.warn(`[player] live auto-reconnect attempt ${attempt}/${maxAttempts}`);
+        tracePlayback(`reload cause=live-error attempt=${attempt}`);
         void b.load({
           url: src.url,
           subtitles: src.subtitles,
@@ -288,6 +290,7 @@ export function useAutoRetry(params: {
       const nextAttempt = currentAttempt + 1;
       console.warn(`[player] ${reason} — retrying with candidate #${nextAttempt}`);
       if (bridgeRef.current) {
+        tracePlayback(`destroy cause=source-auto-retry attempt=${nextAttempt}`);
         bridgeRef.current.destroy();
         bridgeRef.current = null;
       }
@@ -390,6 +393,7 @@ export function useAutoRetry(params: {
             }
             if (!current()) return;
             console.warn(`[player] debrid failover via ${r.via}`);
+            tracePlayback("reload cause=startup-debrid-failover");
             void recoveryBridge.load({
               url,
               subtitles: src.subtitles,
@@ -407,6 +411,7 @@ export function useAutoRetry(params: {
       const b = bridgeRef.current;
       if (b) {
         console.warn(`[player] error "${snap.errorCode}" before playback — reloading same URL`);
+        tracePlayback("reload cause=startup-same-source-error");
         void b.load({
           url: src.url,
           subtitles: src.subtitles,
@@ -430,12 +435,14 @@ export function useAutoRetry(params: {
         console.warn(`[player] error "${snap.errorCode}" — retrying via local stream proxy`);
         void registerStreamProxy(src.url, src.headers)
           .then((p) => {
-            if (current())
+            if (current()) {
+              tracePlayback("reload cause=startup-proxy-recovery");
               void recoveryBridge.load({
                 url: p.url,
                 subtitles: src.subtitles,
                 notWebReady: src.notWebReady,
               });
+            }
           })
           .catch(retry);
         return cancel;
@@ -454,8 +461,10 @@ export function useAutoRetry(params: {
         console.warn(`[player] error "${snap.errorCode}" — remuxing via ffmpeg`);
         void registerStreamProxy(src.url, src.headers, { transcode: true })
           .then((p) => {
-            if (current())
+            if (current()) {
+              tracePlayback("reload cause=startup-remux-recovery");
               void recoveryBridge.load({ url: p.url, subtitles: src.subtitles, notWebReady: true });
+            }
           })
           .catch(retry);
         return cancel;
@@ -474,6 +483,7 @@ export function useAutoRetry(params: {
           if (!current()) return;
           if (ok) {
             console.warn("[player] decode error — retrying via p2p transcoding");
+            tracePlayback("destroy cause=startup-transcode-recovery");
             recoveryBridge.destroy();
             bridgeRef.current = null;
             setTranscodedUrl(buildTranscodedUrl(src.url));
@@ -524,6 +534,7 @@ export function useAutoRetry(params: {
       console.warn(
         `[player] stream ended prematurely at ${pos.toFixed(1)}s of ${snap.durationSec.toFixed(1)}s — reloading same URL for a fresh session`,
       );
+      tracePlayback(`reload cause=truncated-eof position=${pos}`);
       void b.load({
         url: src.url,
         subtitles: src.subtitles,
@@ -742,6 +753,7 @@ export function useAutoRetry(params: {
             p2pCompleteReloadedRef.current = true;
             p2pCompleteReloadedAtRef.current = now;
             console.warn("[player] completed P2P file produced no frame — reloading local stream");
+            tracePlayback("reload cause=completed-p2p-without-frame");
             void bridge.load({
               url: src.url,
               subtitles: src.subtitles,

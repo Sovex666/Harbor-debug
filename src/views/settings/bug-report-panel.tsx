@@ -24,6 +24,7 @@ import { DiagnosticsCard } from "./bug-report/diagnostics-card";
 import { FileDrop } from "./bug-report/file-drop";
 import { SeverityPicker } from "./bug-report/severity-picker";
 import { SuccessCard } from "./bug-report/success-card";
+import { acknowledgeDiagnosticExport, diagnosticSnapshot } from "@/lib/perf/diagnostics";
 
 const QUAL =
   "inline-flex h-[22px] shrink-0 items-center rounded-[6px] px-2 text-[13px] font-bold uppercase leading-[17px] tracking-[0.72px]";
@@ -356,9 +357,15 @@ function ExportLogButton() {
     setState("exporting");
     setDetail(null);
     try {
-      await invoke<string>("mpv_export_log");
+      const diagnostics = diagnosticSnapshot();
+      const throughSequence = diagnostics.events.at(-1)?.sequence ?? 0;
+      const savedPath = await invoke<string>("mpv_export_log", {
+        runtimeText: JSON.stringify(diagnostics, null, 2),
+      });
+      acknowledgeDiagnosticExport(throughSequence);
       setState("done");
-      setDetail(t("Saved to Downloads as harbor-mpv-log.txt. Attach it above."));
+      const filename = savedPath.split(/[\\/]/).at(-1) ?? "harbor-mpv-log.txt";
+      setDetail(t("Saved to Downloads as {filename}. Attach it above.", { filename }));
     } catch (e) {
       setState("error");
       setDetail(e instanceof Error ? e.message : String(e));
@@ -375,7 +382,7 @@ function ExportLogButton() {
         done
           ? detail
           : t(
-              "Writes the last playback session to your Downloads folder so you can attach it above.",
+              "Exports detailed logs across videos since the last successful export to your Downloads folder.",
             )
       }
       warn={

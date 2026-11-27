@@ -1119,6 +1119,12 @@ const NAV_GROUPS: Array<{ heading: string | null; items: NavItem[] }> = [
         ],
       },
       {
+        id: "debugging",
+        label: "Debugging",
+        Icon: IconBug,
+        keywords: ["diagnostics", "capture", "session", "logs", "self test", "retention"],
+      },
+      {
         id: "advanced",
         label: "Advanced",
         Icon: IconAdvanced,
@@ -1140,6 +1146,27 @@ export type SettingsOption = {
 const NAV_ITEM_BY_ID = new Map(NAV_GROUPS.flatMap((g) => g.items).map((i) => [i.id, i] as const));
 
 const SETTINGS_OPTIONS: SettingsOption[] = [
+  {
+    label: "Diagnostic capture",
+    section: "debugging",
+    tab: "capture",
+    anchorTitle: "Capture",
+    keywords: ["debugging", "domains", "basic", "detailed"],
+  },
+  {
+    label: "Diagnostic sessions",
+    section: "debugging",
+    tab: "sessions",
+    anchorTitle: "Sessions",
+    keywords: ["export", "folder", "retention"],
+  },
+  {
+    label: "Diagnostic self-test",
+    section: "debugging",
+    tab: "self-test",
+    anchorTitle: "Self-test",
+    keywords: ["test", "progress"],
+  },
   {
     label: "Who's watching background",
     section: "account",
@@ -8470,6 +8497,13 @@ const SETTINGS_OPTIONS: SettingsOption[] = [
     ],
   },
   {
+    label: "Preload Calendar at startup",
+    section: "library",
+    tab: "library",
+    anchorTitle: "Calendar",
+    keywords: ["calendar", "preload", "startup", "background", "warm", "upcoming", "releases"],
+  },
+  {
     label: "Local library",
     section: "library",
     tab: "library",
@@ -11357,6 +11391,7 @@ function BackButton() {
       type="button"
       onClick={() => (canGoBack ? goBack() : setView("home"))}
       aria-label={t("Back")}
+      data-settings-back
       className={NAV_BACK}
     >
       <svg
@@ -11526,6 +11561,7 @@ export function SettingsNav({
     tv: null,
     bigPicture: null,
     storage: null,
+    debugging: null,
     advanced: null,
   };
 

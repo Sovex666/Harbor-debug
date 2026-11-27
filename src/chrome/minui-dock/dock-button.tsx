@@ -13,14 +13,14 @@ export function DockButton({
   active: boolean;
   scale: number;
   baseSize: number;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent<HTMLButtonElement>) => void;
   hideIndicator?: boolean;
   children: ReactNode;
 }) {
   const [punch, setPunch] = useState(false);
-  const handleClick = () => {
+  const handleClick = (e: React.MouseEvent<HTMLButtonElement>) => {
     setPunch(true);
-    onClick();
+    onClick(e);
     window.setTimeout(() => setPunch(false), 220);
   };
   const lift = scale > 1 ? (scale - 1) * 14 : 0;

@@ -73,6 +73,10 @@ async function fixture(target: ActualPlayback | null = last) {
   ).outputText;
   new Function("require", "exports", coverCode)((id: string) => {
     if (id === "react/jsx-runtime") return jsxRuntime;
+    if (id === "react") return React;
+    // The cover defers loading until it nears the viewport and records readiness.
+    if (id === "@/lib/visibility") return { observeWithin: () => () => {} };
+    if (id === "@/lib/image-readiness") return { beginImageReadiness() {} };
     assert.equal(id, "@/lib/remote-image-proxy");
     return { useProxiedImageSrc: (src: string) => src };
   }, coverImg);

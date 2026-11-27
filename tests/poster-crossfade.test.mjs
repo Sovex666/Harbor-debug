@@ -39,7 +39,11 @@ test("already loaded poster stays revealed without scheduling a redundant crossf
       observeResize: () => () => {},
     },
     "@/lib/render-cause": { noteProbe: (label) => probes.push(label), recordRenderCause: () => {} },
-    "@/lib/remote-image-proxy": { useProxiedImageSrc: (url) => url },
+    "@/lib/remote-image-proxy": {
+      useProxiedImageSrc: (url) => url,
+      isParkedArtworkWarm: () => false,
+    },
+    "@/lib/image-readiness": { beginImageReadiness() {} },
   };
   const code = ts.transpileModule(
     readFileSync(new URL("../src/components/poster.tsx", import.meta.url), "utf8"),

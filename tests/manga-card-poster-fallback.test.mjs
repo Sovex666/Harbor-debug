@@ -6,6 +6,7 @@ import { JSDOM } from "jsdom";
 import * as React from "react";
 import * as jsx from "react/jsx-runtime";
 import { createRoot } from "react-dom/client";
+import * as readiness from "../src/lib/image-readiness.ts";
 
 test("manga browse poster tries HTTPS directly and switches to native proxy after image error", async () => {
   const dom = new JSDOM("<div id='app'></div>", { url: "http://localhost" });
@@ -29,6 +30,7 @@ test("manga browse poster tries HTTPS directly and switches to native proxy afte
       resolveRowScrollRoot: () => undefined,
     },
     "@/lib/settings": { useSettings: () => ({ settings }) },
+    "@/lib/image-readiness": readiness,
     "@/lib/img-size": { qualityMultiplier: () => 0, nativePosterThumbnailWidth: () => undefined },
     "@/lib/visibility": { observeWithin: () => () => {}, observeResize: () => () => {} },
     "@/lib/render-cause": { recordRenderCause: () => {}, noteProbe: () => {} },

@@ -5,7 +5,7 @@ import {
   SlidersHorizontal,
   Star,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import {
   applyCalendarFilter,
   groupByDate,
@@ -18,7 +18,10 @@ import { CalendarConfigRail } from "./calendar/config/config-rail";
 import { buildActiveCount } from "./calendar/config/rail-sources";
 import { useCalendarData } from "./calendar/use-calendar-data";
 import { useAuth } from "@/lib/auth";
-import { library, type LibraryItem } from "@/lib/stremio";
+import type { LibraryItem } from "@/lib/stremio";
+import { readLibraryProjection } from "@/lib/library-read-cache";
+import { activeScopedProfileId } from "@/lib/active-profile-id";
+import { calendarCacheRevision, subscribeCalendarCache } from "@/lib/calendar-cache-scope";
 import { useSettings } from "@/lib/settings";
 import { useTrakt } from "@/lib/trakt/provider";
 import { useSimkl } from "@/lib/simkl/provider";
@@ -54,7 +57,8 @@ export function CalendarView({
 }) {
   const t = useT();
   const { settings, update } = useSettings();
-  const { authKey } = useAuth();
+  const { authKey, user } = useAuth();
+  const revision = useSyncExternalStore(subscribeCalendarCache, calendarCacheRevision);
   const [showAuth, setShowAuth] = useState(false);
   const { openSettings, openMeta } = useView();
   const today = useMemo(() => new Date(), []);
@@ -107,7 +111,7 @@ export function CalendarView({
   const { isConnected: traktConnected } = useTrakt();
   const { isConnected: simklConnected } = useSimkl();
 
-  const { items, loading, error } = useCalendarData({
+  const { items, loading, error, progress } = useCalendarData({
     source,
     authKey,
     traktConnected,
@@ -124,15 +128,19 @@ export function CalendarView({
       return;
     }
     let cancelled = false;
-    library(authKey)
-      .then((rows) => {
-        if (!cancelled) setLibraryItems(rows);
+    setLibraryItems([]);
+    readLibraryProjection({ authKey, userId: user?._id, profileId: activeScopedProfileId() })
+      .then(({ value, refresh }) => {
+        if (!cancelled && value) setLibraryItems(value);
+        void refresh?.then((rows) => {
+          if (!cancelled && rows) setLibraryItems(rows);
+        });
       })
       .catch(() => {});
     return () => {
       cancelled = true;
     };
-  }, [authKey, source]);
+  }, [authKey, source, user?._id, revision]);
 
   const libraryNames = useMemo(() => buildLibraryNameSet(libraryItems), [libraryItems]);
 
@@ -213,7 +221,7 @@ export function CalendarView({
     body = <NotSignedInState onSignIn={() => setShowAuth(true)} />;
   } else if (source === "all" && !settings.tmdbKey) {
     body = <NoKeyState onSetup={() => openSettings("library", "providers")} />;
-  } else if (error) {
+  } else if (error && items.length === 0) {
     body = <ErrorState message={error} />;
   } else if (loading && filtered.length === 0) {
     body = <CalendarSkeleton />;
@@ -243,6 +251,10 @@ export function CalendarView({
   return (
     <main
       data-tv-chrome-offset
+      data-calendar-loading={loading}
+      data-calendar-error={Boolean(error)}
+      data-calendar-items={items.length}
+      data-calendar-complete={!loading && !error && (!progress || progress.complete)}
       className={`flex h-full flex-col overflow-hidden${source === "games" ? " calendar-games-view" : ""}`}
     >
       <header className="shrink-0 border-b border-edge-soft px-12 pb-5 pt-24">
@@ -477,6 +489,13 @@ export function CalendarView({
           ref={scrollRef}
           className="calendar-body-scroll min-w-0 flex-1 overflow-y-auto px-12 py-8"
         >
+          {items.length > 0 && (error || (progress && !progress.complete)) && (
+            <p role="status" className="mb-3 text-sm text-ink-muted">
+              {error ?? t("Loading")}
+              {progress &&
+                ` (${progress.resolved}/${progress.resolved + progress.pending + progress.failed})`}
+            </p>
+          )}
           {body}
         </div>
         {source === "custom" && (

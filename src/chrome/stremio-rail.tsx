@@ -15,10 +15,12 @@ import { useParental } from "@/lib/parental";
 import { useSettings } from "@/lib/settings";
 import { getThemeById } from "@/lib/theme";
 import { useView, type View } from "@/lib/view";
+import { useInstantNav } from "@/chrome/use-instant-nav";
 
 export function StremioRail() {
   const editing = useNavEditMode();
   const { view, setView, chromeHidden } = useView();
+  const selectView = useInstantNav();
   const { locked, unlock, hiddenTabs } = useParental();
   const { settings } = useSettings();
   const t = useT();
@@ -80,7 +82,9 @@ export function StremioRail() {
                 {...item}
                 gated={gated}
                 active={active}
-                onClick={() => (gated ? setPendingPin(item.view) : setView(item.view))}
+                onClick={(e) =>
+                  gated ? setPendingPin(item.view) : selectView(item.view, e, "stremio")
+                }
               />
             );
           })}
@@ -146,7 +150,7 @@ function RailTab({
   label: string;
   active: boolean;
   gated: boolean;
-  onClick: () => void;
+  onClick: (e?: React.MouseEvent<HTMLButtonElement>) => void;
   view?: View;
 }) {
   const t = useT();

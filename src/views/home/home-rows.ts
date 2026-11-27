@@ -92,6 +92,7 @@ export async function buildTmdbRows(settings: Settings) {
       type: spec.type,
       name: spec.name,
       metas: firstPages[i],
+      firstPageLength: firstPages[i].length,
       page: 1,
       hasMore: firstPages[i].length > 0,
       noDedup: spec.noDedup,
